@@ -1,0 +1,21 @@
+# Large / local-only data
+Data/
+outputs/
+Relevant_Papers/
+
+# Proprietary — do not commit
+MediaSDK/
+
+# Local builds of third-party code
+ThirdParty/
+
+# Cloned SLAM repos (tracked as clones, not vendored)
+SLAM/*/
+
+# Python
+__pycache__/
+*.pyc
+
+# Misc
+*.log
+.DS_Store
