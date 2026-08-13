@@ -9,8 +9,11 @@ MediaSDK/
 # Local builds of third-party code
 ThirdParty/
 
-# Cloned SLAM repos (tracked as clones, not vendored)
+# Cloned SLAM repos (tracked as clones, not vendored) — but keep our own dirs
 SLAM/*/
+!SLAM/configs/
+!SLAM/openvins_mods/
+SLAM/ws_openvins/
 
 # Python
 __pycache__/
