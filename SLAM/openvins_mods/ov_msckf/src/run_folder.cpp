@@ -28,6 +28,10 @@
 
 using namespace ov_msckf;
 
+namespace ov_msckf {
+extern double g_vision_noise_mult;
+}
+
 int main(int argc, char **argv) {
 
   if (argc != 4 && argc != 5) {
@@ -132,6 +136,12 @@ int main(int argc, char **argv) {
           cam.masks.push_back(cv::Mat::zeros(img.rows, img.cols, CV_8UC1));
       }
       if (ok) {
+        // gyro-adaptive vision noise: |w| above ~20 deg/s scales sigma linearly
+        {
+          double wmag = m.wm.norm();
+          const double w0 = 0.35; // rad/s
+          g_vision_noise_mult = std::max(1.0, wmag / w0);
+        }
         app->feed_measurement_camera(cam);
         fed++;
         if (app->initialized()) {

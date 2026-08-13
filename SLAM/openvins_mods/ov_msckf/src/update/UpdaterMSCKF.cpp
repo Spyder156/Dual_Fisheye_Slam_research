@@ -39,6 +39,11 @@ using namespace ov_core;
 using namespace ov_type;
 using namespace ov_msckf;
 
+namespace ov_msckf {
+double g_vision_noise_mult = 1.0;
+}
+
+
 UpdaterMSCKF::UpdaterMSCKF(UpdaterOptions &options, ov_core::FeatureInitializerOptions &feat_init_options) : _options(options) {
 
   // Save our raw pixel noise squared
@@ -216,7 +221,7 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
     /// Chi2 distance check
     Eigen::MatrixXd P_marg = StateHelper::get_marginal_covariance(state, Hx_order);
     Eigen::MatrixXd S = H_x * P_marg * H_x.transpose();
-    S.diagonal() += _options.sigma_pix_sq * Eigen::VectorXd::Ones(S.rows());
+    S.diagonal() += g_vision_noise_mult * g_vision_noise_mult * _options.sigma_pix_sq * Eigen::VectorXd::Ones(S.rows());
     double chi2 = res.dot(S.llt().solve(res));
 
     // Get our threshold (we precompute up to 500 but handle the case that it is more)
@@ -288,7 +293,8 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
   rT4 = boost::posix_time::microsec_clock::local_time();
 
   // Our noise is isotropic, so make it here after our compression
-  Eigen::MatrixXd R_big = _options.sigma_pix_sq * Eigen::MatrixXd::Identity(res_big.rows(), res_big.rows());
+  Eigen::MatrixXd R_big =
+      g_vision_noise_mult * g_vision_noise_mult * _options.sigma_pix_sq * Eigen::MatrixXd::Identity(res_big.rows(), res_big.rows());
 
   // 6. With all good features update the state
   StateHelper::EKFUpdate(state, Hx_order_big, Hx_big, res_big, R_big);
