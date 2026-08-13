@@ -81,6 +81,7 @@ int main(int argc, char **argv) {
 
   // ---- load frame timestamps ----
   std::vector<double> ftimes;
+  std::vector<int> fidx;
   {
     std::ifstream f(dir + "/frames.csv");
     if (!f.is_open()) {
@@ -94,6 +95,7 @@ int main(int argc, char **argv) {
       std::string a, b;
       std::getline(ss, a, ',');
       std::getline(ss, b, ',');
+      fidx.push_back(std::stoi(a));
       ftimes.push_back(std::stod(b));
     }
   }
@@ -110,7 +112,7 @@ int main(int argc, char **argv) {
     app->feed_measurement_imu(m);
     while (fi < ftimes.size() && m.timestamp > ftimes[fi] + 0.05) {
       char name[32];
-      snprintf(name, sizeof(name), "/%06zu.jpg", fi + 1);
+      snprintf(name, sizeof(name), "/%06d.jpg", fidx[fi]);
       ov_core::CameraData cam;
       cam.timestamp = ftimes[fi];
       bool ok = true;
