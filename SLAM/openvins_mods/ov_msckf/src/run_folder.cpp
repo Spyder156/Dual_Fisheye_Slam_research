@@ -7,7 +7,8 @@
  *   <dir>/frames.csv   frame,t               (1-indexed, cam0 timeline)
  *   <dir>/cam0/%06d.jpg [cam1/%06d.jpg]
  *
- * Usage: run_folder <estimator_config.yaml> <dataset_dir> <out_traj.csv>
+ * Usage: run_folder <estimator_config.yaml> <dataset_dir> <out_traj.csv> [viz_dir]
+ *   viz_dir: if given, dump the feature-track visualization every 30 frames
  */
 
 #include <cstdio>
@@ -29,13 +30,14 @@ using namespace ov_msckf;
 
 int main(int argc, char **argv) {
 
-  if (argc != 4) {
-    printf("usage: %s <estimator_config.yaml> <dataset_dir> <out_traj.csv>\n", argv[0]);
+  if (argc != 4 && argc != 5) {
+    printf("usage: %s <estimator_config.yaml> <dataset_dir> <out_traj.csv> [viz_dir]\n", argv[0]);
     return 1;
   }
   std::string config_path = argv[1];
   std::string dir = argv[2];
   std::string out_path = argv[3];
+  std::string viz_dir = (argc == 5) ? argv[4] : "";
 
   auto parser = std::make_shared<ov_core::YamlParser>(config_path);
   std::string verbosity = "INFO";
@@ -140,6 +142,14 @@ int main(int argc, char **argv) {
         }
         if (fed % 100 == 0)
           printf("[%d/%zu] init=%d logged=%d\n", fed, ftimes.size(), (int)app->initialized(), logged);
+        if (!viz_dir.empty() && fed % 30 == 0) {
+          cv::Mat viz = app->get_historical_viz_image();
+          if (!viz.empty()) {
+            char vname[64];
+            snprintf(vname, sizeof(vname), "/track_%06d.png", fed);
+            cv::imwrite(viz_dir + vname, viz);
+          }
+        }
       }
       fi++;
     }

@@ -13,7 +13,7 @@ calib_cam_timeoffset: true
 calib_imu_intrinsics: false
 calib_imu_g_sensitivity: false
 
-max_clones: 11
+max_clones: 15
 max_slam: 50
 max_slam_in_update: 25
 max_msckf_in_update: 40
@@ -33,8 +33,8 @@ zupt_max_disparity: 0.5
 zupt_only_at_beginning: false
 
 init_window_time: 2.0
-init_imu_thresh: 0.8
-init_max_disparity: 10.0
+init_imu_thresh: 1.5
+init_max_disparity: 4.0
 init_max_features: 50
 
 init_dyn_use: true # handheld walk may never be static, allow dynamic init
