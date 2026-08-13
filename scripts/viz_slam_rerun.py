@@ -43,40 +43,51 @@ def main():
         rr.log("world/traj", rr.LineStrips3D([P[: i + 1]], colors=[[42, 120, 214]]))
         rr.log("world/pose", rr.Points3D([P[i]], colors=[[235, 104, 52]], radii=0.05))
 
-    # IMU-only trajectory: seeded once from the first filter pose, then pure
-    # dead-reckoning for the whole run — its own independent path, own color.
+    # IMU-only trajectory: starts at t=0 (video start), seeded stationary and
+    # gravity-aligned (yaw arbitrary), pure dead-reckoning — fully independent
+    # of the filter. Drawing stops if it drifts outside a 25m radius so the
+    # 3D view stays usable (dead-reckoning blows up; the early path is the
+    # informative part).
     imu = np.genfromtxt(args.dataset / "imu.csv", delimiter=",", names=True)
     ti_ = imu["t"]
     gyr = np.stack([imu["gx"], imu["gy"], imu["gz"]], 1)
     acc = np.stack([imu["ax"], imu["ay"], imu["az"]], 1)
-    from scipy.spatial.transform import Rotation
-    Q = np.stack([d["qx"], d["qy"], d["qz"], d["qw"]], 1)
-    rots = Rotation.from_quat(Q)
     g_world = np.array([0, 0, 9.81])
-    am = acc[np.searchsorted(ti_, T[len(T) // 2])]
-    R_mid = rots[len(T) // 2].as_matrix()
-    flip = np.linalg.norm(R_mid @ am - g_world) < np.linalg.norm(R_mid.T @ am - g_world)
-    R = rots[0].as_matrix() if flip else rots[0].as_matrix().T  # R_ItoG at t0
-    p = P[0].copy()
-    v = np.gradient(P, T, axis=0)[0].copy()
-    m = (ti_ >= T[0]) & (ti_ <= T[-1])
-    ts_, ws_, as_ = ti_[m], gyr[m], acc[m]
+    g0 = acc[ti_ < 0.5].mean(0)
+    g0 = g0 / np.linalg.norm(g0)
+    # R_ItoG seed: rotate measured gravity dir onto +z (minimal rotation)
+    zw = np.array([0, 0, 1.0])
+    ax = np.cross(g0, zw)
+    s = np.linalg.norm(ax)
+    c = float(g0 @ zw)
+    if s < 1e-9:
+        R = np.eye(3) if c > 0 else np.diag([1.0, -1.0, -1.0])
+    else:
+        ax = ax / s
+        K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+        ang0 = np.arctan2(s, c)
+        R = np.eye(3) + np.sin(ang0) * K + (1 - np.cos(ang0)) * K @ K
+    p = np.zeros(3)
+    v = np.zeros(3)
     path = [p.copy()]
-    times = [ts_[0]]
-    for k in range(len(ts_) - 1):
-        dt = ts_[k + 1] - ts_[k]
-        a_w = R @ as_[k] - g_world
+    times = [ti_[0]]
+    for k in range(len(ti_) - 1):
+        dt = ti_[k + 1] - ti_[k]
+        a_w = R @ acc[k] - g_world
         p = p + v * dt + 0.5 * a_w * dt * dt
         v = v + a_w * dt
-        th = ws_[k] * dt
+        th = gyr[k] * dt
         ang = np.linalg.norm(th)
         if ang > 1e-12:
             kx = th / ang
             K = np.array([[0, -kx[2], kx[1]], [kx[2], 0, -kx[0]], [-kx[1], kx[0], 0]])
             R = R @ (np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * K @ K)
+        if np.linalg.norm(p) > 25.0:
+            print(f"imu path left 25m radius at t={ti_[k]:.1f}s; truncated there")
+            break
         if k % 100 == 0:
             path.append(p.copy())
-            times.append(ts_[k + 1])
+            times.append(ti_[k + 1])
     path = np.array(path)
     for i in range(1, len(path)):
         set_t(times[i])
