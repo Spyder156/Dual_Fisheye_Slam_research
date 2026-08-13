@@ -43,57 +43,44 @@ def main():
         rr.log("world/traj", rr.LineStrips3D([P[: i + 1]], colors=[[42, 120, 214]]))
         rr.log("world/pose", rr.Points3D([P[i]], colors=[[235, 104, 52]], radii=0.05))
 
-    # IMU dead-reckon ribbons: every RESET seconds, re-seed p/v/R from the filter
-    # trajectory and integrate raw IMU. Divergence of a ribbon from the blue line
-    # shows IMU-vs-filter inconsistency (timing, bias, noise) locally in time.
+    # IMU-only trajectory: seeded once from the first filter pose, then pure
+    # dead-reckoning for the whole run — its own independent path, own color.
     imu = np.genfromtxt(args.dataset / "imu.csv", delimiter=",", names=True)
     ti_ = imu["t"]
     gyr = np.stack([imu["gx"], imu["gy"], imu["gz"]], 1)
     acc = np.stack([imu["ax"], imu["ay"], imu["az"]], 1)
-    from scipy.spatial.transform import Rotation, Slerp
+    from scipy.spatial.transform import Rotation
     Q = np.stack([d["qx"], d["qy"], d["qz"], d["qw"]], 1)
     rots = Rotation.from_quat(Q)
-    # resolve JPL-vs-Hamilton: pick the mapping that sends accel to +z gravity
     g_world = np.array([0, 0, 9.81])
     am = acc[np.searchsorted(ti_, T[len(T) // 2])]
     R_mid = rots[len(T) // 2].as_matrix()
     flip = np.linalg.norm(R_mid @ am - g_world) < np.linalg.norm(R_mid.T @ am - g_world)
-    slerp = Slerp(T, rots)
-    RESET = 2.0
-    vel = np.gradient(P, T, axis=0)
-    ribbons = []
-    t0 = T[0]
-    while t0 + RESET <= T[-1]:
-        i0 = np.searchsorted(T, t0)
-        R = rots[i0].as_matrix() if flip else rots[i0].as_matrix().T  # R_ItoG
-        p = P[i0].copy()
-        v = vel[i0].copy()
-        seg = [p.copy()]
-        m = (ti_ >= T[i0]) & (ti_ < T[i0] + RESET)
-        ts_, ws_, as_ = ti_[m], gyr[m], acc[m]
-        for k in range(len(ts_) - 1):
-            dt = ts_[k + 1] - ts_[k]
-            a_w = R @ as_[k] - g_world
-            p = p + v * dt + 0.5 * a_w * dt * dt
-            v = v + a_w * dt
-            th = ws_[k] * dt
-            ang = np.linalg.norm(th)
-            if ang > 1e-12:
-                kx = th / ang
-                K = np.array([[0, -kx[2], kx[1]], [kx[2], 0, -kx[0]], [-kx[1], kx[0], 0]])
-                R = R @ (np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * K @ K)
-            if k % 100 == 0:
-                seg.append(p.copy())
-        seg.append(p.copy())
-        ribbons.append((T[i0], np.array(seg)))
-        t0 += RESET
-    for tr, seg in ribbons:
-        set_t(tr + RESET)
-        rr.log(f"world/imu_deadreckon/{int(tr*10)}", rr.LineStrips3D([seg], colors=[[235, 161, 0]], radii=0.01))
-    for i in range(0, len(imu["t"]), 50):
-        set_t(imu["t"][i])
-        rr.log("imu/gyro_mag", rr.Scalars(float(np.hypot(np.hypot(imu["gx"][i], imu["gy"][i]), imu["gz"][i]))))
-        rr.log("imu/accel_mag", rr.Scalars(float(np.hypot(np.hypot(imu["ax"][i], imu["ay"][i]), imu["az"][i]))))
+    R = rots[0].as_matrix() if flip else rots[0].as_matrix().T  # R_ItoG at t0
+    p = P[0].copy()
+    v = np.gradient(P, T, axis=0)[0].copy()
+    m = (ti_ >= T[0]) & (ti_ <= T[-1])
+    ts_, ws_, as_ = ti_[m], gyr[m], acc[m]
+    path = [p.copy()]
+    times = [ts_[0]]
+    for k in range(len(ts_) - 1):
+        dt = ts_[k + 1] - ts_[k]
+        a_w = R @ as_[k] - g_world
+        p = p + v * dt + 0.5 * a_w * dt * dt
+        v = v + a_w * dt
+        th = ws_[k] * dt
+        ang = np.linalg.norm(th)
+        if ang > 1e-12:
+            kx = th / ang
+            K = np.array([[0, -kx[2], kx[1]], [kx[2], 0, -kx[0]], [-kx[1], kx[0], 0]])
+            R = R @ (np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * K @ K)
+        if k % 100 == 0:
+            path.append(p.copy())
+            times.append(ts_[k + 1])
+    path = np.array(path)
+    for i in range(1, len(path)):
+        set_t(times[i])
+        rr.log("world/imu_traj", rr.LineStrips3D([path[: i + 1]], colors=[[235, 104, 52]]))
 
     # frames + KLT tracks (python-side, for visualization of what is trackable)
     frames = np.genfromtxt(args.dataset / "frames.csv", delimiter=",", names=True)
