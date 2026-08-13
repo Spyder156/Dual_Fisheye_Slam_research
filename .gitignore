@@ -13,6 +13,7 @@ ThirdParty/
 SLAM/*/
 !SLAM/configs/
 !SLAM/openvins_mods/
+!SLAM/results/
 SLAM/ws_openvins/
 
 # Python
