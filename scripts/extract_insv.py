@@ -10,9 +10,10 @@ Outputs:
     out_dir/frames.csv        frame index -> timestamp (from container fps)
     out_dir/info.json         probe + IMU stats, for sanity-checking
 
-Units note: telemetry-parser's normalized_imu() reports gyro in deg/s and accel
-in g; we convert to rad/s and m/s^2. The printed |a| magnitude should hover
-around 9.81 for a mostly-static start — check it on first real data.
+Units note: telemetry-parser's normalized_imu() reports gyro in deg/s (converted
+here to rad/s) and accel already in m/s^2 (verified on One RS data: raw |a| mean
+~9.7 during a walk; an extra x9.81 gave ~95). The printed |a| magnitude should
+hover around 9.81.
 
 Run with the `vision` conda env python (has telemetry_parser installed).
 """
@@ -57,7 +58,7 @@ def extract_imu(video: Path, out_csv: Path) -> dict:
     for s in imu:
         t = s["timestamp_ms"] / 1000.0
         gx, gy, gz = (math.radians(v) for v in s["gyro"])
-        ax, ay, az = (v * G for v in s["accl"])
+        ax, ay, az = s["accl"]
         rows.append((t, gx, gy, gz, ax, ay, az))
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f)
@@ -75,14 +76,22 @@ def extract_imu(video: Path, out_csv: Path) -> dict:
     }
 
 
-def extract_frames(video: Path, out_dir: Path, fps: float | None) -> int:
+def extract_frames(video: Path, out_dir: Path, fps: float | None, ext: str,
+                   rotate180: bool) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video)]
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-map", "0:v:0"]
+    vf = []
     if fps:
-        cmd += ["-vf", f"fps={fps}"]
-    cmd += [str(out_dir / "%06d.png")]
+        vf.append(f"fps={fps}")
+    if rotate180:
+        vf += ["hflip", "vflip"]
+    if vf:
+        cmd += ["-vf", ",".join(vf)]
+    if ext == "jpg":
+        cmd += ["-q:v", "2"]
+    cmd += [str(out_dir / f"%06d.{ext}")]
     subprocess.run(cmd, check=True)
-    return len(list(out_dir.glob("*.png")))
+    return len(list(out_dir.glob(f"*.{ext}")))
 
 
 def main():
@@ -92,10 +101,15 @@ def main():
     ap.add_argument("--fps", type=float, default=None,
                     help="frame extraction rate (default: every frame)")
     ap.add_argument("--no-frames", action="store_true", help="IMU only")
+    ap.add_argument("--ext", choices=["png", "jpg"], default="png",
+                    help="frame format (jpg q2 for full-rate extractions)")
+    ap.add_argument("--rotate180", action="store_true",
+                    help="camera held upside down: rotate frames 180 (hflip+vflip)")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    info = {"videos": [probe(v) for v in args.videos], "imu": None, "frames": {}}
+    info = {"videos": [probe(v) for v in args.videos], "imu": None, "frames": {},
+            "rotate180": args.rotate180}
     for v in info["videos"]:
         print(f"{v['file']}: {v['codec']} {v['width']}x{v['height']} "
               f"@{v['fps']:.2f}fps, {v['duration_s']:.1f}s")
@@ -117,7 +131,8 @@ def main():
             w = csv.writer(f)
             w.writerow(["frame", "t"])
             for cam, v in enumerate(args.videos):
-                n = extract_frames(v, args.out / f"cam{cam}", args.fps)
+                n = extract_frames(v, args.out / f"cam{cam}", args.fps, args.ext,
+                                   args.rotate180)
                 info["frames"][f"cam{cam}"] = n
                 print(f"cam{cam}: {n} frames -> {args.out / f'cam{cam}'}")
                 if cam == 0:
