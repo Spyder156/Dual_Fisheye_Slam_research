@@ -29,6 +29,7 @@ def main():
     ap.add_argument("out", type=Path)
     ap.add_argument("--stride", type=int, default=4, help="log every Nth frame")
     ap.add_argument("--scale", type=float, default=0.25, help="image downscale for logging")
+    ap.add_argument("--gt", type=Path, default=None, help="GT csv (frame,x,y,z) to overlay, own frame")
     args = ap.parse_args()
 
     rr.init("insv_slam", spawn=False)
@@ -92,6 +93,12 @@ def main():
     for i in range(1, len(path)):
         set_t(times[i])
         rr.log("world/imu_traj", rr.LineStrips3D([path[: i + 1]], colors=[[235, 104, 52]]))
+
+    if args.gt is not None:
+        g = np.genfromtxt(args.gt, delimiter=",", names=True)
+        Pg = np.stack([g["x"], g["y"], g["z"]], 1)
+        Pg = Pg - Pg[0] + P[0]  # origin-shifted to filter start; orientation unaligned
+        rr.log("world/gt_traj", rr.LineStrips3D([Pg], colors=[[27, 175, 122]]), static=True)
 
     # frames + KLT tracks (python-side, for visualization of what is trackable)
     frames = np.genfromtxt(args.dataset / "frames.csv", delimiter=",", names=True)

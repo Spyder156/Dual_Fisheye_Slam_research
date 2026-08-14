@@ -24,12 +24,17 @@
 #include "core/VioManagerOptions.h"
 #include "state/State.h"
 #include "utils/opencv_yaml_parse.h"
+#include "utils/quat_ops.h"
 #include "utils/sensor_data.h"
 
 using namespace ov_msckf;
 
 namespace ov_msckf {
 extern double g_vision_noise_mult;
+}
+namespace ov_core {
+extern double g_rs_readout_s;
+extern Eigen::Vector3d g_rs_w_cam[4];
 }
 
 int main(int argc, char **argv) {
@@ -51,6 +56,12 @@ int main(int argc, char **argv) {
   VioManagerOptions params;
   params.print_and_load(parser);
   auto app = std::make_shared<VioManager>(params);
+  const char *rs_env = std::getenv("OV_RS_READOUT_MS");
+  ov_core::g_rs_readout_s = (rs_env != nullptr) ? std::atof(rs_env) * 1e-3 : 0.0;
+  printf("rolling-shutter readout: %.1f ms\n", ov_core::g_rs_readout_s * 1e3);
+  std::vector<Eigen::Matrix3d> R_ItoC;
+  for (int c = 0; c < params.state_options.num_cameras; c++)
+    R_ItoC.push_back(ov_core::quat_2_Rot(params.camera_extrinsics.at(c).block(0, 0, 4, 1)));
   if (!parser->successful()) {
     printf(RED "unable to parse all parameters, please fix\n" RESET);
     return 1;
@@ -142,6 +153,8 @@ int main(int argc, char **argv) {
           const double w0 = 0.35; // rad/s
           g_vision_noise_mult = std::max(1.0, wmag / w0);
         }
+        for (int c = 0; c < num_cams && c < 4; c++)
+          ov_core::g_rs_w_cam[c] = R_ItoC[c] * m.wm;
         app->feed_measurement_camera(cam);
         fed++;
         if (app->initialized()) {

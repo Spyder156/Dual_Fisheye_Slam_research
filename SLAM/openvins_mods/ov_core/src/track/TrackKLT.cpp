@@ -31,6 +31,14 @@
 
 using namespace ov_core;
 
+namespace ov_core {
+// project-local rolling-shutter compensation: readout time (s, signed for scan
+// direction) and per-camera angular velocity (camera frame) at the current frame.
+double g_rs_readout_s = 0.0;
+Eigen::Vector3d g_rs_w_cam[4] = {Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()};
+} // namespace ov_core
+
+
 void TrackKLT::feed_new_camera(const CameraData &message) {
 
   // Error check that we have all the data
@@ -176,9 +184,34 @@ void TrackKLT::feed_monocular(const CameraData &message, size_t msg_id) {
              good_left.size());
 
   // Update our feature database, with theses new observations
+  // Rolling-shutter compensation: rotate each feature's bearing by w*dt where
+  // dt is the row's readout offset from the frame-center timestamp.
+  const double rs = g_rs_readout_s;
+  const Eigen::Vector3d w_c = (cam_id < 4) ? g_rs_w_cam[cam_id] : Eigen::Vector3d::Zero();
   for (size_t i = 0; i < good_left.size(); i++) {
-    cv::Point2f npt_l = camera_calib.at(cam_id)->undistort_cv(good_left.at(i).pt);
-    database->update_feature(good_ids_left.at(i), message.timestamp, cam_id, good_left.at(i).pt.x, good_left.at(i).pt.y, npt_l.x, npt_l.y);
+    cv::Point2f uv = good_left.at(i).pt;
+    if (rs != 0.0 && w_c.norm() > 1e-6) {
+      double dt = (uv.y / (double)img.rows - 0.5) * rs;
+      Eigen::Vector2f zn = camera_calib.at(cam_id)->undistort_f(Eigen::Vector2f(uv.x, uv.y));
+      Eigen::Vector3d b(zn(0), zn(1), 1.0);
+      b.normalize();
+      Eigen::Vector3d th = w_c * dt;
+      double a = th.norm();
+      if (a > 1e-12) {
+        Eigen::Vector3d k = th / a;
+        Eigen::Matrix3d K;
+        K << 0, -k(2), k(1), k(2), 0, -k(0), -k(1), k(0), 0;
+        Eigen::Matrix3d R = Eigen::Matrix3d::Identity() + std::sin(a) * K + (1 - std::cos(a)) * K * K;
+        b = R * b;
+      }
+      if (b(2) > 1e-6) {
+        Eigen::Vector2f uv2 = camera_calib.at(cam_id)->distort_f(Eigen::Vector2f(b(0) / b(2), b(1) / b(2)));
+        if (uv2(0) >= 0 && uv2(0) < img.cols && uv2(1) >= 0 && uv2(1) < img.rows)
+          uv = cv::Point2f(uv2(0), uv2(1));
+      }
+    }
+    cv::Point2f npt_l = camera_calib.at(cam_id)->undistort_cv(uv);
+    database->update_feature(good_ids_left.at(i), message.timestamp, cam_id, uv.x, uv.y, npt_l.x, npt_l.y);
   }
 
   // Move forward in time
