@@ -31,6 +31,8 @@ using namespace ov_msckf;
 
 namespace ov_msckf {
 extern double g_vision_noise_mult;
+extern double g_last_reproj_rms;
+extern int g_last_reproj_n;
 }
 namespace ov_core {
 extern double g_rs_readout_s;
@@ -119,6 +121,8 @@ int main(int argc, char **argv) {
 
   std::ofstream out(out_path);
   out << "t,px,py,pz,qx,qy,qz,qw\n";
+  std::ofstream stats(out_path + ".stats.csv");
+  stats << "t,reproj_rms_px,reproj_feats\n";
 
   // ---- main loop: feed imu, and pending camera frames once imu passes them ----
   size_t fi = 0;
@@ -163,6 +167,7 @@ int main(int argc, char **argv) {
           Eigen::Vector3d p = state->_imu->pos();
           out << state->_timestamp << "," << p(0) << "," << p(1) << "," << p(2) << "," << q(0) << "," << q(1) << "," << q(2) << ","
               << q(3) << "\n";
+          stats << state->_timestamp << "," << g_last_reproj_rms << "," << g_last_reproj_n << "\n";
           logged++;
         }
         if (fed % 100 == 0)

@@ -41,6 +41,9 @@ using namespace ov_msckf;
 
 namespace ov_msckf {
 double g_vision_noise_mult = 1.0;
+// project-local: per-update reprojection residual stats for logging
+double g_last_reproj_rms = -1.0;
+int g_last_reproj_n = 0;
 }
 
 
@@ -284,6 +287,13 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
   assert(ct_jacob <= max_hx_size);
   res_big.conservativeResize(ct_meas, 1);
   Hx_big.conservativeResize(ct_meas, ct_jacob);
+  if (ct_meas > 0) {
+    g_last_reproj_rms = std::sqrt(res_big.squaredNorm() / (double)ct_meas);
+    g_last_reproj_n = (int)ct_meas / 2;
+  } else {
+    g_last_reproj_rms = -1.0;
+    g_last_reproj_n = 0;
+  }
 
   // 5. Perform measurement compression
   UpdaterHelper::measurement_compress_inplace(Hx_big, res_big);

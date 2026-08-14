@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--stride", type=int, default=4, help="log every Nth frame")
     ap.add_argument("--scale", type=float, default=0.25, help="image downscale for logging")
     ap.add_argument("--gt", type=Path, default=None, help="GT csv (frame,x,y,z) to overlay, own frame")
+    ap.add_argument("--colmap-model", type=Path, default=None, help="COLMAP sparse model dir for cloud overlay")
+    ap.add_argument("--colmap-scale", type=float, default=1.2967)
     args = ap.parse_args()
 
     bp = rrb.Blueprint(
@@ -38,8 +40,9 @@ def main():
             rrb.Spatial3DView(origin="/world", name="trajectories", contents="/world/**"),
             rrb.Vertical(
                 rrb.Spatial2DView(origin="/cam0", name="camera", contents="/cam0/**"),
-                rrb.TimeSeriesView(origin="/imu", name="imu", contents="/imu/**"),
-                row_shares=[3, 1],
+                rrb.TimeSeriesView(origin="/plots/err", name="errors", contents="/plots/err/**"),
+                rrb.TimeSeriesView(origin="/plots/imu", name="imu", contents="/plots/imu/**"),
+                row_shares=[3, 1, 1],
             ),
         )
     )
@@ -80,13 +83,14 @@ def main():
         K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
         ang0 = np.arctan2(s, c)
         R = np.eye(3) + np.sin(ang0) * K + (1 - np.cos(ang0)) * K @ K
+    ba = acc[ti_ < 1.0].mean(0) - R.T @ g_world  # standstill accel bias estimate
     p = np.zeros(3)
     v = np.zeros(3)
     path = [p.copy()]
     times = [ti_[0]]
     for k in range(len(ti_) - 1):
         dt = ti_[k + 1] - ti_[k]
-        a_w = R @ acc[k] - g_world
+        a_w = R @ (acc[k] - ba) - g_world
         p = p + v * dt + 0.5 * a_w * dt * dt
         v = v + a_w * dt
         th = gyr[k] * dt
@@ -95,8 +99,8 @@ def main():
             kx = th / ang
             K = np.array([[0, -kx[2], kx[1]], [kx[2], 0, -kx[0]], [-kx[1], kx[0], 0]])
             R = R @ (np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * K @ K)
-        if np.linalg.norm(p) > 25.0:
-            print(f"imu path left 25m radius at t={ti_[k]:.1f}s; truncated there")
+        if np.linalg.norm(p) > 40.0:
+            print(f"imu path left 40m radius at t={ti_[k]:.1f}s; truncated there")
             break
         if k % 100 == 0:
             path.append(p.copy())
@@ -106,11 +110,55 @@ def main():
         set_t(times[i])
         rr.log("world/imu_traj", rr.LineStrips3D([path[: i + 1]], colors=[[235, 104, 52]]))
 
+    # scalar plots: imu magnitudes, rotation error (filter vs gyro yaw), reprojection error
+    wmag = np.linalg.norm(gyr, axis=1)
+    amag = np.linalg.norm(acc, axis=1)
+    for k in range(0, len(ti_), 100):
+        set_t(ti_[k])
+        rr.log("plots/imu/gyro_rads", rr.Scalars(float(wmag[k])))
+        rr.log("plots/imu/accel_ms2", rr.Scalars(float(amag[k])))
+    R_ItoG = [r.as_matrix() if flip else r.as_matrix().T for r in rots]
+    fwd = np.array([1.0, 0, 0])
+    yawf = np.unwrap([np.arctan2((Rm_ @ fwd)[1], (Rm_ @ fwd)[0]) for Rm_ in R_ItoG])
+    Rg_ = R_ItoG[0].copy()
+    k0 = np.searchsorted(ti_, T[0])
+    yg, tg2 = [np.arctan2((Rg_ @ fwd)[1], (Rg_ @ fwd)[0])], [T[0]]
+    for k in range(k0, np.searchsorted(ti_, T[-1]) - 1):
+        dtk = ti_[k + 1] - ti_[k]
+        th = gyr[k] * dtk
+        a = np.linalg.norm(th)
+        if a > 1e-12:
+            kx = th / a
+            K = np.array([[0, -kx[2], kx[1]], [kx[2], 0, -kx[0]], [-kx[1], kx[0], 0]])
+            Rg_ = Rg_ @ (np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * K @ K)
+        if k % 100 == 0:
+            yg.append(np.arctan2((Rg_ @ fwd)[1], (Rg_ @ fwd)[0]))
+            tg2.append(ti_[k])
+    yg = np.unwrap(yg)
+    yi = np.interp(tg2, T, yawf)
+    err = np.degrees(np.abs((yi - yi[0]) - (yg - yg[0])))
+    for tt_, e in zip(tg2, err):
+        set_t(tt_)
+        rr.log("plots/err/rot_err_deg", rr.Scalars(float(e)))
+    stats_path = Path(str(args.traj) + ".stats.csv")
+    if stats_path.exists():
+        st = np.genfromtxt(stats_path, delimiter=",", names=True)
+        for k in range(len(st["t"])):
+            if st["reproj_rms_px"][k] >= 0:
+                set_t(st["t"][k])
+                rr.log("plots/err/reproj_rms_px", rr.Scalars(float(st["reproj_rms_px"][k])))
+
     if args.gt is not None:
         g = np.genfromtxt(args.gt, delimiter=",", names=True)
         Pg = np.stack([g["x"], g["y"], g["z"]], 1)
         Pg = Pg - Pg[0] + P[0]  # origin-shifted to filter start; orientation unaligned
         rr.log("world/gt_traj", rr.LineStrips3D([Pg], colors=[[27, 175, 122]]), static=True)
+        if args.colmap_model is not None:
+            import viz_colmap_rerun as vcr
+            pts, cols = vcr.read_points3d(args.colmap_model / "points3D.bin")
+            g0 = np.stack([g["x"], g["y"], g["z"]], 1)[0]
+            pts_m = pts * args.colmap_scale - g0 + P[0]
+            rr.log("world/colmap_cloud", rr.Points3D(pts_m, colors=cols, radii=0.006), static=True)
 
     # frames + KLT tracks (python-side, for visualization of what is trackable)
     frames = np.genfromtxt(args.dataset / "frames.csv", delimiter=",", names=True)
