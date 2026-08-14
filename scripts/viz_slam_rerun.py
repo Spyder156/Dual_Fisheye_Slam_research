@@ -35,16 +35,17 @@ def main():
 
     bp = rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial3DView(origin="world", name="trajectories"),
+            rrb.Spatial3DView(origin="/world", name="trajectories", contents="/world/**"),
             rrb.Vertical(
-                rrb.Spatial2DView(origin="cam0", name="camera"),
-                rrb.TimeSeriesView(origin="imu", name="imu"),
+                rrb.Spatial2DView(origin="/cam0", name="camera", contents="/cam0/**"),
+                rrb.TimeSeriesView(origin="/imu", name="imu", contents="/imu/**"),
                 row_shares=[3, 1],
             ),
         )
     )
-    rr.init("insv_slam", spawn=False, default_blueprint=bp)
-    rr.save(str(args.out), default_blueprint=bp)
+    rr.init("insv_slam_v2", spawn=False)
+    rr.save(str(args.out))
+    rr.send_blueprint(bp, make_active=True, make_default=True)
 
     # trajectory
     d = np.genfromtxt(args.traj, delimiter=",", names=True)
