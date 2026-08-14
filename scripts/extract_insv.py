@@ -77,9 +77,9 @@ def extract_imu(video: Path, out_csv: Path) -> dict:
 
 
 def extract_frames(video: Path, out_dir: Path, fps: float | None, ext: str,
-                   rotate180: bool) -> int:
+                   rotate180: bool, stream: int = 0) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-map", "0:v:0"]
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-map", f"0:v:{stream}"]
     vf = []
     if fps:
         vf.append(f"fps={fps}")
@@ -130,9 +130,14 @@ def main():
         with open(args.out / "frames.csv", "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["frame", "t"])
-            for cam, v in enumerate(args.videos):
+            # X-series: one file with two video streams; One RS: one file per lens
+            nstreams = sum(1 for s in info["videos"] for _ in [0] if True)
+            multi = len(args.videos) == 1
+            cams = [(0, args.videos[0], 0), (1, args.videos[0], 1)] if multi else \
+                   [(i, v, 0) for i, v in enumerate(args.videos)]
+            for cam, v, stream in cams:
                 n = extract_frames(v, args.out / f"cam{cam}", args.fps, args.ext,
-                                   args.rotate180)
+                                   args.rotate180, stream)
                 info["frames"][f"cam{cam}"] = n
                 print(f"cam{cam}: {n} frames -> {args.out / f'cam{cam}'}")
                 if cam == 0:
