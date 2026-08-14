@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 import rerun as rr
+import rerun.blueprint as rrb
 
 
 def set_t(t):
@@ -32,8 +33,18 @@ def main():
     ap.add_argument("--gt", type=Path, default=None, help="GT csv (frame,x,y,z) to overlay, own frame")
     args = ap.parse_args()
 
-    rr.init("insv_slam", spawn=False)
-    rr.save(str(args.out))
+    bp = rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial3DView(origin="world", name="trajectories"),
+            rrb.Vertical(
+                rrb.Spatial2DView(origin="cam0", name="camera"),
+                rrb.TimeSeriesView(origin="imu", name="imu"),
+                row_shares=[3, 1],
+            ),
+        )
+    )
+    rr.init("insv_slam", spawn=False, default_blueprint=bp)
+    rr.save(str(args.out), default_blueprint=bp)
 
     # trajectory
     d = np.genfromtxt(args.traj, delimiter=",", names=True)
@@ -118,7 +129,7 @@ def main():
         if prev is not None and ppts is not None and len(ppts):
             p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, img, ppts, None, winSize=(15, 15), maxLevel=4)
             ok = st.ravel().astype(bool)
-            rr.log("cam0/tracks", rr.Points2D(p1.reshape(-1, 2)[ok], colors=[[27, 175, 122]], radii=1.5))
+            rr.log("cam0/image/tracks", rr.Points2D(p1.reshape(-1, 2)[ok], colors=[[27, 175, 122]], radii=1.5))
         ppts = cv2.goodFeaturesToTrack(img, 250, 0.01, 8, mask=mask)
         prev = img
     print(f"saved {args.out} — open with: rerun {args.out}")
