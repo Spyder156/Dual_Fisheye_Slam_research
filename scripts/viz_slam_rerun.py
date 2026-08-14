@@ -40,8 +40,8 @@ def main():
             rrb.Spatial3DView(origin="/world", name="trajectories", contents="/world/**"),
             rrb.Vertical(
                 rrb.Spatial2DView(origin="/cam0", name="camera", contents="/cam0/**"),
-                rrb.TimeSeriesView(origin="/plots/err", name="errors", contents="/plots/err/**"),
-                rrb.TimeSeriesView(origin="/plots/imu", name="imu", contents="/plots/imu/**"),
+                rrb.TimeSeriesView(origin="/plots/err/rot_err_deg", name="rotation error [deg]"),
+                rrb.TimeSeriesView(origin="/plots/err/reproj_rms_px", name="reprojection rms [px]"),
                 row_shares=[3, 1, 1],
             ),
         )
@@ -111,12 +111,6 @@ def main():
         rr.log("world/imu_traj", rr.LineStrips3D([path[: i + 1]], colors=[[235, 104, 52]]))
 
     # scalar plots: imu magnitudes, rotation error (filter vs gyro yaw), reprojection error
-    wmag = np.linalg.norm(gyr, axis=1)
-    amag = np.linalg.norm(acc, axis=1)
-    for k in range(0, len(ti_), 100):
-        set_t(ti_[k])
-        rr.log("plots/imu/gyro_rads", rr.Scalars(float(wmag[k])))
-        rr.log("plots/imu/accel_ms2", rr.Scalars(float(amag[k])))
     from scipy.spatial.transform import Rotation
     Q = np.stack([d["qx"], d["qy"], d["qz"], d["qw"]], 1)
     rots = Rotation.from_quat(Q)
