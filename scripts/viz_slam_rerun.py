@@ -117,6 +117,12 @@ def main():
         set_t(ti_[k])
         rr.log("plots/imu/gyro_rads", rr.Scalars(float(wmag[k])))
         rr.log("plots/imu/accel_ms2", rr.Scalars(float(amag[k])))
+    from scipy.spatial.transform import Rotation
+    Q = np.stack([d["qx"], d["qy"], d["qz"], d["qw"]], 1)
+    rots = Rotation.from_quat(Q)
+    am_ = acc[np.searchsorted(ti_, T[len(T) // 2])]
+    Rm_chk = rots[len(T) // 2].as_matrix()
+    flip = np.linalg.norm(Rm_chk @ am_ - g_world) < np.linalg.norm(Rm_chk.T @ am_ - g_world)
     R_ItoG = [r.as_matrix() if flip else r.as_matrix().T for r in rots]
     fwd = np.array([1.0, 0, 0])
     yawf = np.unwrap([np.arctan2((Rm_ @ fwd)[1], (Rm_ @ fwd)[0]) for Rm_ in R_ItoG])
