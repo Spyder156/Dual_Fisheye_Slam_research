@@ -90,6 +90,8 @@ def main():
     ap.add_argument("out", type=Path)
     ap.add_argument("--scale", type=float, required=True)
     ap.add_argument("--fps", type=float, default=30000 / 1001)
+    ap.add_argument("--clip-m", type=float, default=float("inf"),
+                    help="hide poses/points farther than this [m] from the robust trajectory center (diverged models)")
     args = ap.parse_args()
 
     bp = rrb.Blueprint(
@@ -110,10 +112,22 @@ def main():
     rr.save(str(args.out))
     rr.send_blueprint(bp, make_active=True, make_default=True)
 
-    pts, cols = read_points3d(args.model / "points3D.bin")
-    rr.log("world/cloud", rr.Points3D(pts * args.scale, colors=cols, radii=0.01), static=True)
-
     cams, imgs, p3d = read_model(args.model)
+    # robust center from camera positions (median), for clipping diverged models
+    allC = []
+    for name, (q, t, cid, _) in imgs.items():
+        R = qtoR(q)
+        allC.append(-R.T @ t)
+    allC = np.array(allC) * args.scale
+    ctr = np.median(allC, 0)
+    d_ = np.linalg.norm(allC - ctr, 1e0 * np.ones(1).astype(int)[0] if False else None, axis=1) if False else np.linalg.norm(allC - ctr, axis=1)
+    ctr = np.median(allC[d_ < np.percentile(d_, 40)], 0)  # re-center on the dense cluster
+
+    pts, cols = read_points3d(args.model / "points3D.bin")
+    pm = pts * args.scale
+    keep = np.linalg.norm(pm - ctr, axis=1) < args.clip_m
+    print(f"cloud: {keep.sum()}/{len(pm)} points within clip radius")
+    rr.log("world/cloud", rr.Points3D(pm[keep], colors=cols[keep], radii=0.01), static=True)
     by_frame = {}
     for name, (q, t, cid, pts2d) in imgs.items():
         cam, fn = name.split("/")
@@ -130,11 +144,14 @@ def main():
             q, t, cid, pts2d = by_frame[fr][cam]
             R = qtoR(q)
             C = -R.T @ t
-            if cam == "cam0":
+            clipped = np.linalg.norm(C * args.scale - ctr) > args.clip_m
+            if cam == "cam0" and not clipped:
                 path.append(C * args.scale)
                 rr.log("world/gt_traj", rr.LineStrips3D([np.array(path)], colors=[[27, 175, 122]]))
             # rig frustum: camera pose + pinhole (nominal 90deg fov for display)
             w, h, params = cams[cid]
+            if clipped:
+                continue
             rr.log(f"world/rig/{cam}", rr.Transform3D(translation=C * args.scale, mat3x3=R.T))
             rr.log(f"world/rig/{cam}", rr.Pinhole(resolution=[w * IMG_SCALE, h * IMG_SCALE],
                                                   focal_length=float(w * IMG_SCALE / 2), image_plane_distance=0.25))
