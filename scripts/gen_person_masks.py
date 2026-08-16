@@ -16,7 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-PROMPTS = ["person", "hand", "arm", "held object", "phone"]
+PROMPTS = ["person", "hand", "arm", "held object", "phone", "camera", "selfie stick", "camera grip", "monopod"]
 CONF = 0.25
 DILATE = 15
 
