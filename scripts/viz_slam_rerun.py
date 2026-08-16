@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--gt", type=Path, default=None, help="GT csv (frame,x,y,z) to overlay, own frame")
     ap.add_argument("--colmap-model", type=Path, default=None, help="COLMAP sparse model dir for cloud overlay")
     ap.add_argument("--colmap-scale", type=float, default=1.2967)
+    ap.add_argument("--trackviz", type=Path, default=None,
+                    help="dir of OpenVINS tracker images (viz.csv + track_*.jpg); replaces python-KLT overlay")
     args = ap.parse_args()
 
     bp = rrb.Blueprint(
@@ -160,12 +162,28 @@ def main():
             pts_m = pts * args.colmap_scale - g0 + P[0]
             rr.log("world/colmap_cloud", rr.Points3D(pts_m, colors=cols, radii=0.006), static=True)
 
+    if args.trackviz is not None:
+        tv = np.genfromtxt(args.trackviz / "viz.csv", delimiter=",", names=True, dtype=None, encoding="utf-8")
+        for row in tv:
+            img = cv2.imread(str(args.trackviz / str(row["file"])), cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            if w > 1600:
+                img = cv2.resize(img, (1600, int(h * 1600 / w)))
+            set_t(float(row["t"]))
+            rr.log("cam0/image", rr.Image(img[:, :, ::-1]).compress(jpeg_quality=75))
+        print(f"logged {len(tv)} tracker frames")
+        return_early = True
+    else:
+        return_early = False
+
     # frames + KLT tracks (python-side, for visualization of what is trackable)
     frames = np.genfromtxt(args.dataset / "frames.csv", delimiter=",", names=True)
     fids = frames["frame"].astype(int)
     fts = frames["t"]
     prev, ppts = None, None
-    for k in range(0, len(fids), args.stride):
+    for k in (range(0) if return_early else range(0, len(fids), args.stride)):
         img = cv2.imread(str(args.dataset / "cam0" / f"{fids[k]:06d}.jpg"), 0)
         if img is None:
             continue
