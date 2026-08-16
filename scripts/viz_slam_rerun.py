@@ -163,9 +163,11 @@ def main():
             rr.log("world/colmap_cloud", rr.Points3D(pts_m, colors=cols, radii=0.006), static=True)
 
     if args.trackviz is not None:
-        tv = np.genfromtxt(args.trackviz / "viz.csv", delimiter=",", names=True, dtype=None, encoding="utf-8")
-        for row in tv:
-            img = cv2.imread(str(args.trackviz / str(row["file"])), cv2.IMREAD_COLOR)
+        import csv as _csv
+        with open(args.trackviz / "viz.csv") as fh:
+            rows = list(_csv.DictReader(fh))
+        for row in rows:
+            img = cv2.imread(str(args.trackviz / row["file"]), cv2.IMREAD_COLOR)
             if img is None:
                 continue
             h, w = img.shape[:2]
@@ -173,7 +175,7 @@ def main():
                 img = cv2.resize(img, (1600, int(h * 1600 / w)))
             set_t(float(row["t"]))
             rr.log("cam0/image", rr.Image(img[:, :, ::-1]).compress(jpeg_quality=75))
-        print(f"logged {len(tv)} tracker frames")
+        print(f"logged {len(rows)} tracker frames")
         return_early = True
     else:
         return_early = False
