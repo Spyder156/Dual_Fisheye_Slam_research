@@ -109,12 +109,17 @@ def main():
     yaws_gt = np.unwrap(np.radians([yaw(v) for v in Vg]))
     ta, tb = None, None
     for i in range(len(tg) - 1):
+        if tg[i] < 8.0:
+            continue
         j = np.searchsorted(tg, tg[i] + 6.0)
         if j >= len(tg):
             break
-        if abs(np.degrees(yaws_gt[j] - yaws_gt[i])) > 45:
+        if speed[i:j].min() < 0.2:
+            continue  # only windows of sustained walking (yaw well-defined)
+        dy = np.degrees(yaws_gt[j] - yaws_gt[i])
+        if 45 < abs(dy) < 170:
             ta, tb = tg[i], tg[j]
-            dyaw_gt = np.degrees(yaws_gt[j] - yaws_gt[i])
+            dyaw_gt = dy
             break
     print(f"first-turn window: t=[{ta:.1f},{tb:.1f}]s, GT dyaw={dyaw_gt:+.0f} deg")
 
