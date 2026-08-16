@@ -111,7 +111,7 @@ def main():
     Pg = np.stack([g["x"], g["y"], g["z"]], 1)
     # gravity-align the COLMAP world (its axes are arbitrary): measured gravity dir -> -z
     g_w = np.array([-0.23, -0.97, 0.085])
-    Rg_align = rot_a_to_b(-g_w, np.array([0, 0, 1.0]))
+    Rg_align = rot_a_to_b(g_w, np.array([0, 0, 1.0]))  # g_w is the accel REST reading = UP
     Pg = (Rg_align @ Pg.T).T
     Vg = np.gradient(Pg, tg, axis=0)
     speed = np.linalg.norm(Vg, axis=1)
