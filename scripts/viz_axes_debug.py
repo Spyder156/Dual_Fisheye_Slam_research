@@ -85,6 +85,7 @@ def main():
     ap.add_argument("slam", type=Path)
     ap.add_argument("gt", type=Path)
     ap.add_argument("out", type=Path)
+    ap.add_argument("--model", type=Path, default=Path("Data/Home/dataset/colmap8/sparse_rig/1"))
     args = ap.parse_args()
 
     imu = np.genfromtxt(args.dataset / "imu.csv", delimiter=",", names=True)
@@ -121,7 +122,44 @@ def main():
             ta, tb = tg[i], tg[j]
             dyaw_gt = dy
             break
-    print(f"first-turn window: t=[{ta:.1f},{tb:.1f}]s, GT dyaw={dyaw_gt:+.0f} deg")
+    # GT FACING yaw from COLMAP camera rotations (comparable with gyro/optical/slam)
+    import struct as _st
+    cam0R = {}
+    with open(args.model / "images.bin", "rb") as fh:
+        n = _st.unpack("<Q", fh.read(8))[0]
+        for _ in range(n):
+            _st.unpack("<I", fh.read(4))
+            q_ = np.array(_st.unpack("<4d", fh.read(32)))
+            fh.read(24)
+            _st.unpack("<I", fh.read(4))
+            name = b""
+            while True:
+                c = fh.read(1)
+                if c == b"\x00":
+                    break
+                name += c
+            np_ = _st.unpack("<Q", fh.read(8))[0]
+            fh.read(24 * np_)
+            nm = name.decode()
+            if nm.startswith("cam0/"):
+                w_, x_, y_, z_ = q_
+                Rcw = np.array([[1-2*(y_*y_+z_*z_), 2*(x_*y_-w_*z_), 2*(x_*z_+w_*y_)],
+                                [2*(x_*y_+w_*z_), 1-2*(x_*x_+z_*z_), 2*(y_*z_-w_*x_)],
+                                [2*(x_*z_-w_*y_), 2*(y_*z_+w_*x_), 1-2*(x_*x_+y_*y_)]])
+                cam0R[int(nm.split("/")[1].split(".")[0])] = Rcw
+    gt_frames = np.array(sorted(cam0R))
+    gt_times = (gt_frames - 1) / FPS - 0.012
+    def gt_facing(t):
+        k = int(np.clip(np.searchsorted(gt_times, t), 0, len(gt_frames) - 1))
+        Rcw = cam0R[gt_frames[k]]
+        fwd_w = Rcw.T @ np.array([0, 0, 1.0])   # camera forward in COLMAP world
+        return Ra_gt @ fwd_w
+    dyaw_gt_face = yaw(gt_facing(tb)) - yaw(gt_facing(ta))
+    dyaw_gt_face = (dyaw_gt_face + 180) % 360 - 180
+    print(f"first-turn window: t=[{ta:.1f},{tb:.1f}]s, GT walk-dyaw={dyaw_gt:+.0f}, GT FACING dyaw={dyaw_gt_face:+.0f}")
+    dyaw_gt = dyaw_gt_face
+    fwd_gt = gt_facing(tg[0])
+    fwd_gt = fwd_gt / np.linalg.norm(fwd_gt)
 
     # ---------- gyro chain ----------
     up_body = acc[ti < 1.0].mean(0)
