@@ -185,9 +185,9 @@ def main():
     dyaw_gy = yaw(Ra_gy @ (Rtb @ f_I)) - yaw(Ra_gy @ (Rta @ f_I))
     dyaw_gy = (dyaw_gy + 180) % 360 - 180
 
-    # ---------- optical chain ----------
-    up_cam = np.array([0, -1.0, 0])
-    Ra_vo = rot_a_to_b(up_cam, np.array([0, 0, 1.0]))
+    # ---------- optical chain: expressed in the VERIFIED gyro frame ----------
+    Ra_vo = Ra_gy @ R_ItoC0.T  # cam0 vectors -> imu frame -> gravity-aligned
+    up_cam = R_ItoC0 @ up_body / np.linalg.norm(up_body)
     def vo_R(f0, f1):
         Rw = np.eye(3)
         for i in range(f0, f1 - 10, 5):
@@ -222,6 +222,24 @@ def main():
     dyaw_vo = (dyaw_vo + 180) % 360 - 180
     fwd_vo0 = Ra_vo @ z0
 
+    # ---------- extra turn windows (init-transient vs consistent error) ----------
+    extra = []
+    i0 = np.searchsorted(tg, tb + 4.0)
+    found = 0
+    i = i0
+    while i < len(tg) - 1 and found < 3:
+        j = np.searchsorted(tg, tg[i] + 6.0)
+        if j >= len(tg):
+            break
+        if speed[i:j].min() >= 0.2:
+            dy = np.degrees(yaws_gt[j] - yaws_gt[i])
+            if 45 < abs(dy) < 170:
+                extra.append((tg[i], tg[j]))
+                found += 1
+                i = j + 10
+                continue
+        i += 1
+
     # ---------- SLAM chain ----------
     d = np.genfromtxt(args.slam, delimiter=",", names=True)
     ts = d["t"]
@@ -255,6 +273,8 @@ def main():
     rr.init("axes_debug", spawn=False)
     rr.save(str(args.out))
     rr.send_blueprint(bp, make_active=True, make_default=True)
+    set_t = (lambda t: rr.set_time_seconds("t", t)) if hasattr(rr, "set_time_seconds") else (lambda t: rr.set_time("t", duration=t))
+    set_t(0.0)
 
     chains = [
         ("gt", np.array([0, 0, 0.0]), np.array([0, 0, 1.0]), fwd_gt, dyaw_gt),
@@ -270,10 +290,15 @@ def main():
         rr.log(f"triads/{name}", rr.Arrows3D(
             origins=[org, org, org],
             vectors=[up * 1.2, fwd_h * 1.2, left * 1.2],
-            colors=[[60, 130, 255], [30, 200, 90], [230, 70, 70]],
-            labels=[f"{name}:UP", f"{name}:FWD@t0", f"{name}:LEFT"]), static=True)
+            colors=[[60, 130, 255], [30, 200, 90], [230, 70, 70]]))
         legend.append(f"  {name:8s} dyaw = {dy:+7.1f} deg   (same sign as gt = same convention)")
-    rr.log("legend", rr.TextDocument("\n".join(legend)), static=True)
+    for (wa, wb) in extra:
+        dg = yaw(gt_facing(wb)) - yaw(gt_facing(wa)); dg = (dg + 180) % 360 - 180
+        Rta2, Rtb2 = gyro_R(0, wa), gyro_R(0, wb)
+        dgy = yaw(Ra_gy @ (Rtb2 @ f_I)) - yaw(Ra_gy @ (Rta2 @ f_I)); dgy = (dgy + 180) % 360 - 180
+        dsl = yaw(slam_fwd(wb)) - yaw(slam_fwd(wa)); dsl = (dsl + 180) % 360 - 180
+        legend.append(f"  window t=[{wa:.0f},{wb:.0f}]s: gt={dg:+6.1f}  gyro={dgy:+6.1f}  slam={dsl:+6.1f}")
+    rr.log("legend", rr.TextDocument("\n".join(legend)))
     print("\n".join(legend))
 
     # ---------- fisheye frames with projected axes ----------
@@ -295,7 +320,7 @@ def main():
         cv2.putText(img, f"{tag} f{fr}: IMU axes projected via R_ItoC0 (blue=imu_X, should point at CEILING side)",
                     (60, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (255, 255, 255), 4)
         img = cv2.resize(img, None, fx=0.35, fy=0.35)
-        rr.log(f"frame_axes/{tag}", rr.Image(img[:, :, ::-1]).compress(jpeg_quality=80), static=True)
+        rr.log(f"frame_axes/{tag}", rr.Image(img[:, :, ::-1]).compress(jpeg_quality=80))
     print(f"saved {args.out}")
 
 
