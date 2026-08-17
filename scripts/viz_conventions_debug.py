@@ -129,7 +129,7 @@ def main():
     gyr = np.stack([imu["gx"], imu["gy"], imu["gz"]], 1)
     acc = np.stack([imu["ax"], imu["ay"], imu["az"]], 1)
 
-    R_ItoC0 = np.load(f"{S}/R_ItoC0_gt.npy")
+    R_ItoC0 = np.load("/home/raghav/workspace/INSV_STITCHING/SLAM/configs/insta360_oners/R_ItoC0_gt.npy")
     f_I = R_ItoC0.T @ np.array([0, 0, 1.0])
 
     # ---- pure optical VO (cam0), gap 10, step 5 ----

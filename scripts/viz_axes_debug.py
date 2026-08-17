@@ -92,7 +92,7 @@ def main():
     ti = imu["t"]
     gyr = np.stack([imu["gx"], imu["gy"], imu["gz"]], 1)
     acc = np.stack([imu["ax"], imu["ay"], imu["az"]], 1)
-    R_ItoC0 = np.load(f"{S}/R_ItoC0_gt.npy")
+    R_ItoC0 = np.load("/home/raghav/workspace/INSV_STITCHING/SLAM/configs/insta360_oners/R_ItoC0_gt.npy")
 
     # ---------- GT chain ----------
     g = np.genfromtxt(args.gt, delimiter=",", names=True)
