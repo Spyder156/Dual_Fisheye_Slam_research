@@ -184,7 +184,7 @@ def main():
         if s1 < 0:
             td = -td
         t_ = (i - 1 + 10) / FPS
-        vo_tdir[t_] = (Rw.T @ td).copy()   # in cam0(t0) frame
+        vo_tdir[t_] = -(Rw.T @ td).copy()  # epipolar t = R(C_i - C_j): points BACKWARD; negate for motion
         Rw = R @ Rw
         vo_R[t_] = Ra_vo @ Rw.T @ R_ItoC0  # body -> aligned
     A_vo = yaw_align_R(vo_R[min(vo_R)], f_I)

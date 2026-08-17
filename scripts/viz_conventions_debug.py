@@ -178,7 +178,7 @@ def main():
         # camera-frame motion -> world: Rw is R_c0(t0)->c0(ti)... maintain world = first cam frame
         t_mid = (i - 1 + GAP / 2) / FPS
         v = np.interp(t_mid, tg, speed)
-        p = p + Rw.T @ (tdir_cam * v * (STEP / FPS))
+        p = p - Rw.T @ (tdir_cam * v * (STEP / FPS))  # epipolar t points backward
         Rw = R @ Rw
         vo_pts.append(p.copy())
         vo_t.append((i - 1 + GAP) / FPS)
