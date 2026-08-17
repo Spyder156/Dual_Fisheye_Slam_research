@@ -194,11 +194,9 @@ def main():
     ts = d["t"]
     Ps_raw = np.stack([d["px"], d["py"], d["pz"]], 1)
     rots = Rotation.from_quat(np.stack([d["qx"], d["qy"], d["qz"], d["qw"]], 1))
-    am = acc[np.searchsorted(ti, ts[len(ts) // 2])]
-    Rm = rots[len(ts) // 2].as_matrix()
-    flip = np.linalg.norm(Rm @ am - np.array([0, 0, 9.81])) < np.linalg.norm(Rm.T @ am - np.array([0, 0, 9.81]))
+    # JPL [x,y,z,w] of R_GtoI read as Hamilton = its transpose = R_ItoG. Always.
     def slam_R_wI(k):
-        return rots[k].as_matrix() if flip else rots[k].as_matrix().T
+        return rots[k].as_matrix()
     A_sl = yaw_align_R(slam_R_wI(0), f_I)
     Ps = (A_sl @ (Ps_raw - Ps_raw[0]).T).T
 
