@@ -8,9 +8,30 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 
 ---
 
+## Locked Architecture (decided 2026-08-23)
+
+| layer | decision |
+|---|---|
+| **Base** | OKVIS2-X (superset of OKVIS2; unused modalities disabled) |
+| **Camera model** | Decided empirically — COLMAP bake-off, best converger wins (§1) |
+| **Input** | Raw fisheye. No perspective rendering, no equirectangular. Ever. |
+| **Features** | Classical + lines, with fast-learned alternatives benchmarked (§2) |
+| **Rig** | cam0-anchored + camera-indexed residuals |
+| **Loops** | Cross-camera aware, two-stage, + our improvements (§8) |
+| **IMU init** | Dynamic |
+| **Calibration** | Short COLMAP-based refinement pass at run start, with masks |
+| **Rolling shutter** | Experimental (§6) — genuine gap in the whole SLAM track |
+| **Masking** | Geometric height rejection primary; masks tested at least in the COLMAP step |
+| **Refinement** | Online sliding-window VI-BA (overlapping keyframe batches), scale anchored on the rig baseline (§9) |
+
+---
+
 ## 0. Infrastructure — do these first, everything else is unmeasurable without them
 
-- [ ] **Deterministic mode** (`num_opencv_threads: 1`). We measured **±25% run-to-run spread** on identical configs. Every A/B before this is noise.
+- [x] **Deterministic mode — SOLVED 2026-08-23.** Root cause was **`init_dyn_mle_max_threads: 6`** — the dynamic initializer's Ceres solve is multi-threaded, and multi-threaded Ceres is nondeterministic in FP summation order. Set to **1** → byte-identical runs.
+  - Also fixed en route: OpenVINS parses `num_opencv_threads` but **never calls `cv::setNumThreads()`** — every app must apply it itself, and our runner didn't. The setting was inert for every run we had ever done. Now applied (0 = threading off).
+  - Ruled out by experiment: OpenCV threading (spread persisted with it fully disabled), ASLR / pointer-keyed `unordered_map` iteration (spread persisted with ASLR off).
+  - **Implication beyond determinism:** a floating-point summation difference in the initializer amplified into 326 m vs 1804 m trajectories. The filter is not merely noisy on this data — it is **chaotic**, i.e. operating at the edge of stability. Strong argument for a keyframe-BA system that re-linearizes over a filter that commits.
 - [ ] Run each config **3×**, report spread not a single number.
 - [ ] Fixed metric set for every run: ATE RMSE, per-turn yaw error vs gyro, loop-closure gap, coverage %, features-used/frame, reprojection RMS.
 - [ ] Auto-generate the standard Rerun recording for every run (already scripted).
@@ -34,7 +55,12 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 - [ ] **Equal-area spherical bucketing vs plain pixel-grid bucketing.** Isolate this one. Expected to be large — pixel-grid bucketing packs features into the image centre and starves the periphery.
   - [ ] Vary cell count and quadtree depth.
   - [ ] Works with any detector — test with ORB *and* SuperPoint.
-- [ ] Detector bake-off: FAST+ORB / SIFT / SuperPoint / ALIKED / XFeat.
+- [ ] Detector bake-off, ordered by cost:
+  - Classical: **FAST+ORB**, SIFT
+  - Fast learned: **XFeat**, **ALIKED**, EdgePoint2, SiLK, GCNv2
+  - **ZippyPoint** — binary descriptors, designed as an ORB-SLAM drop-in. Highest value/effort ratio if it works.
+  - Heavy learned (keyframes/loops only): SuperPoint+LightGlue, RoMa, LoMa
+- [ ] Matcher pairing matters as much as detector: brute-force vs LightGlue vs learned-dense. Benchmark detector×matcher, not detector alone.
 - [ ] Feature budget: 250 / 500 / 800 / 1500.
 - [ ] **Line features (ELSED).** Points-only vs points+lines. *Both top-2 teams use lines; nobody else does.* Prime suspect for the textureless failure.
   - [ ] Spherical line representation (great-circle normals) vs naive 2D lines.
@@ -106,8 +132,15 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 - [ ] **Measure what fraction of accepted loops are cross-camera.** This is the number that says whether the rig earns its keep.
 - [ ] False-loop rejection on repetitive structure (white walls, identical corridors) — the dominant reported failure, not distortion.
 
-## 9. Offline / Global Refinement
+## 9. Online Sliding-Window VI-BA + Global Refinement
 
+**The scale question (raised 2026-08-23, and it's the right question).** Concern: an online VI-BA's visual scale fights the IMU's metric scale. In a *tightly-coupled* graph there is no fight by construction — IMU and visual factors sit in one optimization and scale is jointly observable. The fight is real in three cases: (a) visual BA run separately then merged, (b) low IMU excitation, (c) **a bad accelerometer — which is our case** (ours integrated *worse* than assuming constant velocity). So:
+
+- [ ] **Anchor scale on the 4 cm rig baseline, not the accelerometer.** Hard geometric constant, always available, already proven (rig-constrained COLMAP recovered 0.58 m/s correctly). Accel becomes a secondary source, gated on the IMU health test.
+- [ ] Note: overlapping keyframe batches (1–12, 7–18, 13–24…) *is* a marginalized sliding window — OKVIS2's native architecture. Confirm before building anything new.
+- [ ] Marginalize old states (OKVIS2 default) vs re-linearize a covisibility window (ORB-SLAM3 style). Measure.
+- [ ] Vary window length and overlap.
+- [ ] Trigger a full re-linearization pass on loop closure.
 - [ ] None vs VI-BA vs **rig-constrained COLMAP BA** (already working for us at 0.99 px).
 - [ ] Keyframe subsampling: every 4th / 8th / 16th frame.
 - [ ] Frozen vs refined intrinsics and extrinsics in the global pass.

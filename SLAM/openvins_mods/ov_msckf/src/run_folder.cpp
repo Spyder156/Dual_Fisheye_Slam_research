@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -57,6 +58,10 @@ int main(int argc, char **argv) {
 
   VioManagerOptions params;
   params.print_and_load(parser);
+  // NOTE: the library parses num_opencv_threads but never applies it; each app must.
+  // 0 disables OpenCV's threading framework entirely (repeatability), per run_simulation.cpp.
+  cv::setNumThreads(params.num_opencv_threads);
+  printf("opencv threads: %d\n", params.num_opencv_threads);
   auto app = std::make_shared<VioManager>(params);
   const char *rs_env = std::getenv("OV_RS_READOUT_MS");
   ov_core::g_rs_readout_s = (rs_env != nullptr) ? std::atof(rs_env) * 1e-3 : 0.0;
@@ -172,12 +177,20 @@ int main(int argc, char **argv) {
         }
         if (fed % 100 == 0)
           printf("[%d/%zu] init=%d logged=%d\n", fed, ftimes.size(), (int)app->initialized(), logged);
-        if (!viz_dir.empty() && fed % 30 == 0) {
+        static int viz_every = []() {
+          const char *e = std::getenv("OV_VIZ_EVERY");
+          return (e != nullptr) ? std::atoi(e) : 30;
+        }();
+        if (!viz_dir.empty() && fed % viz_every == 0) {
           cv::Mat viz = app->get_historical_viz_image();
           if (!viz.empty()) {
             char vname[64];
-            snprintf(vname, sizeof(vname), "/track_%06d.png", fed);
-            cv::imwrite(viz_dir + vname, viz);
+            snprintf(vname, sizeof(vname), "/track_%06d.jpg", fed);
+            cv::imwrite(viz_dir + vname, viz, {cv::IMWRITE_JPEG_QUALITY, 80});
+            static std::ofstream vizcsv(viz_dir + "/viz.csv");
+            static bool hdr = [&]() { vizcsv << "t,file\n"; return true; }();
+            (void)hdr;
+            vizcsv << cam.timestamp << ",track_" << std::setw(6) << std::setfill('0') << fed << ".jpg\n";
           }
         }
       }
