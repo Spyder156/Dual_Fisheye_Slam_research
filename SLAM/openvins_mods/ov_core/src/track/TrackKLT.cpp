@@ -531,6 +531,8 @@ void TrackKLT::perform_detection_monocular(const std::vector<cv::Mat> &img0pyr, 
   }
   std::vector<cv::KeyPoint> pts0_ext;
   Grider_GRID::perform_griding(img0pyr.at(0), mask0_updated, valid_locs, pts0_ext, num_features, grid_x, grid_y, threshold, true);
+  PRINT_INFO("[DETDBG] imgsz=%dx%d need=%d validcells=%zu/%d ext=%zu thresh=%d numfeat=%d\n", img0pyr.at(0).cols,
+             img0pyr.at(0).rows, num_featsneeded, valid_locs.size(), grid_x * grid_y, pts0_ext.size(), threshold, num_features);
 
   // Now, reject features that are close a current feature
   std::vector<cv::KeyPoint> kpts0_new;
