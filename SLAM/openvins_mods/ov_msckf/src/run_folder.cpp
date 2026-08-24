@@ -167,12 +167,26 @@ int main(int argc, char **argv) {
         app->feed_measurement_camera(cam);
         fed++;
         if (app->initialized()) {
+          // The filter's state timestamp only advances at the update rate (~10 Hz),
+          // which would give duplicate rows and poor GT coverage. Propagate the
+          // state forward to THIS frame's timestamp so we emit one pose per frame.
           auto state = app->get_state();
-          Eigen::Vector4d q = state->_imu->quat(); // JPL [x,y,z,w], R_GtoI
-          Eigen::Vector3d p = state->_imu->pos();
-          out << state->_timestamp << "," << p(0) << "," << p(1) << "," << p(2) << "," << q(0) << "," << q(1) << "," << q(2) << ","
-              << q(3) << "\n";
-          stats << state->_timestamp << "," << g_last_reproj_rms << "," << g_last_reproj_n << "\n";
+          Eigen::Matrix<double, 13, 1> sp;
+          Eigen::Matrix<double, 12, 12> cov;
+          double t_out = cam.timestamp;
+          Eigen::Vector4d q;
+          Eigen::Vector3d p;
+          if (app->get_propagator()->fast_state_propagate(state, t_out, sp, cov)) {
+            q = sp.block(0, 0, 4, 1);
+            p = sp.block(4, 0, 3, 1);
+          } else {
+            t_out = state->_timestamp;
+            q = state->_imu->quat();
+            p = state->_imu->pos();
+          }
+          out << std::setprecision(9) << std::fixed << t_out << "," << p(0) << "," << p(1) << "," << p(2) << "," << q(0) << ","
+              << q(1) << "," << q(2) << "," << q(3) << "\n";
+          stats << t_out << "," << g_last_reproj_rms << "," << g_last_reproj_n << "\n";
           logged++;
         }
         if (fed % 100 == 0)

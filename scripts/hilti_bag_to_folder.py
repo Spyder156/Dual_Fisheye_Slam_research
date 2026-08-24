@@ -19,44 +19,52 @@ import struct
 from pathlib import Path
 
 
-def cdr_string(buf, off):
-    """Read a CDR-encoded string; returns (value, new_offset)."""
-    (n,) = struct.unpack_from("<I", buf, off)
-    off += 4
-    s = buf[off:off + n - 1].decode("utf-8", "replace")
-    off += n
-    off = (off + 3) & ~3  # align 4
-    return s, off
+def _align(pos, n):
+    """CDR alignment is relative to the start of the message BODY (after the
+    4-byte encapsulation header), not the absolute buffer offset."""
+    return (pos + n - 1) & ~(n - 1)
 
 
-def parse_header(buf, off):
-    """std_msgs/Header: stamp(sec int32, nsec uint32) + frame_id string."""
-    sec, nsec = struct.unpack_from("<iI", buf, off)
-    off += 8
-    _frame_id, off = cdr_string(buf, off)
-    return sec + nsec * 1e-9, off
+def cdr_string(body, pos):
+    """uint32 length (incl. null) + chars. Returns (value, new_pos)."""
+    pos = _align(pos, 4)
+    (n,) = struct.unpack_from("<I", body, pos)
+    pos += 4
+    s = body[pos:pos + n - 1].decode("utf-8", "replace")
+    return s, pos + n
+
+
+def parse_header(body, pos):
+    """std_msgs/Header: int32 sec, uint32 nanosec, string frame_id."""
+    pos = _align(pos, 4)
+    sec, nsec = struct.unpack_from("<iI", body, pos)
+    pos += 8
+    _frame_id, pos = cdr_string(body, pos)
+    return sec + nsec * 1e-9, pos
 
 
 def parse_compressed_image(data):
-    """sensor_msgs/CompressedImage: header, format string, uint8[] data."""
-    off = 4  # CDR encapsulation header
-    t, off = parse_header(data, off)
-    _fmt, off = cdr_string(data, off)
-    (n,) = struct.unpack_from("<I", data, off)
-    off += 4
-    return t, data[off:off + n]
+    """sensor_msgs/CompressedImage: header, string format, uint8[] data."""
+    body = data[4:]
+    t, pos = parse_header(body, 0)
+    _fmt, pos = cdr_string(body, pos)
+    pos = _align(pos, 4)
+    (n,) = struct.unpack_from("<I", body, pos)
+    pos += 4
+    return t, body[pos:pos + n]
 
 
 def parse_imu(data):
-    """sensor_msgs/Imu: header, orientation(4d)+cov(9d), ang_vel(3d)+cov(9d),
-    lin_acc(3d)+cov(9d). Doubles are 8-aligned."""
-    off = 4
-    t, off = parse_header(data, off)
-    off = (off + 7) & ~7
-    off += 4 * 8 + 9 * 8          # orientation + covariance
-    gx, gy, gz = struct.unpack_from("<3d", data, off)
-    off += 3 * 8 + 9 * 8          # angular velocity + covariance
-    ax, ay, az = struct.unpack_from("<3d", data, off)
+    """sensor_msgs/Imu. float64 fields are 8-aligned within the body."""
+    body = data[4:]
+    t, pos = parse_header(body, 0)
+    pos = _align(pos, 8)
+    pos += 4 * 8          # orientation (quaternion)
+    pos += 9 * 8          # orientation_covariance
+    gx, gy, gz = struct.unpack_from("<3d", body, pos)
+    pos += 3 * 8
+    pos += 9 * 8          # angular_velocity_covariance
+    ax, ay, az = struct.unpack_from("<3d", body, pos)
     return t, (gx, gy, gz, ax, ay, az)
 
 
@@ -116,6 +124,14 @@ def main():
         f.write("t,gx,gy,gz,ax,ay,az\n")
         for r in imu_rows:
             f.write(",".join(f"{x:.9f}" for x in r) + "\n")
+
+    # sanity gate: a correctly parsed accelerometer must average ~9.81 m/s^2
+    import math
+    mags = [math.sqrt(r[4] ** 2 + r[5] ** 2 + r[6] ** 2) for r in imu_rows[:5000]]
+    g_mean = sum(mags) / len(mags)
+    if not (8.5 < g_mean < 11.0):
+        raise SystemExit(f"IMU PARSE FAILED: mean |a| = {g_mean:.3g}, expected ~9.81. "
+                         "CDR offsets are wrong; refusing to write a corrupt dataset.")
 
     imu_rate = (len(imu_rows) - 1) / (imu_rows[-1][0] - imu_rows[0][0])
     cam_rate = (n - 1) / (per_cam["cam0"][n - 1][0] - t0_img)

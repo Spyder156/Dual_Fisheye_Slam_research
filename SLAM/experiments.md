@@ -8,23 +8,62 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 
 ---
 
-## Locked Architecture (decided 2026-08-23)
+## The Plan
+
+**Goal:** beat 2410 on the Hilti×Trimble SLAM track. See `SOLUTIONS.md` for what the field did.
+**Bar:** ~89/seq for top-10 · ~92 for top-5 · **~96.4 to win**. Decided on the underground sequences, not the easy floors.
+
+### Phase 0 — Measurement you can trust *(mostly done)*
+Deterministic runs · fixed metric set · GT scoring · one committed config per experiment. Without this every A/B is noise.
+
+### Phase 1 — Baseline *(done)*
+Stock OpenVINS + our fixes on floor_EG. **83.5 mean score** (0.307 / 0.154 / 0.877 m). This is the number to beat, not the thing we ship.
+
+### Phase 2 — Calibration *(in progress)*
+COLMAP-refined camera models, bake-off across KB4 / Mei / EUCM / Double Sphere, per-model params fed back into the estimator.
+
+### Phase 3 — Move to the real base
+**OKVIS2.** Keyframe-BA + loop closure. The base decides the ceiling: OpenVINS teams landed 13th–14th, OKVIS2 teams landed 1st and 7th. OKVIS2 ships KB4 natively and the challenge provides KB4 intrinsics, so this needs **no new camera model to start**.
+
+### Phase 4 — The intersection recipe (what the winners share)
+Raw fisheye · EUCM-family model · **equal-area angular feature selection** · **lines** · cam0-anchored rig · **cross-camera two-stage loops** · dynamic init.
+
+### Phase 5 — Our additions (where we pass them)
+1. **Rolling shutter** — a genuine hole in the entire SLAM track.
+2. **Rig-constrained global BA** — already working for us at 0.99 px.
+3. **Metric scale anchored on the 4 cm baseline**, not the accelerometer.
+4. **Zero-parallax operator detection** — geometric, no semantic model.
+5. **Rotation-first estimation** — the research bet.
+
+### Locked Architecture
 
 | layer | decision |
 |---|---|
-| **Base** | OKVIS2-X (superset of OKVIS2; unused modalities disabled) |
-| **Camera model** | Decided empirically — COLMAP bake-off, best converger wins (§1) |
+| **Base** | OKVIS2 (OKVIS2-X has no public release; its extras are LiDAR/GNSS/depth we don't have) |
+| **Camera model** | Decided empirically — COLMAP bake-off (§1) |
 | **Input** | Raw fisheye. No perspective rendering, no equirectangular. Ever. |
-| **Features** | Classical + lines, with fast-learned alternatives benchmarked (§2) |
+| **Features** | Classical + lines; fast-learned alternatives benchmarked (§2) |
 | **Rig** | cam0-anchored + camera-indexed residuals |
-| **Loops** | Cross-camera aware, two-stage, + our improvements (§8) |
+| **Loops** | Cross-camera aware, two-stage, Sim(3) default |
 | **IMU init** | Dynamic |
-| **Calibration** | Short COLMAP-based refinement pass at run start, with masks |
-| **Rolling shutter** | Experimental (§6) — genuine gap in the whole SLAM track |
-| **Masking** | Geometric height rejection primary; masks tested at least in the COLMAP step |
-| **Refinement** | Online sliding-window VI-BA (overlapping keyframe batches), scale anchored on the rig baseline (§9) |
+| **Calibration** | COLMAP refinement pass, masks tested |
+| **Rolling shutter** | Experimental (§6) |
+| **Masking** | Geometric height rejection primary; semantic masks tested in the COLMAP step |
+| **Refinement** | Sliding-window VI-BA, scale anchored on the rig baseline (§9) |
 
 ---
+
+## Lessons Already Paid For — do not repeat
+
+- `num_opencv_threads` is parsed by OpenVINS but **`cv::setNumThreads()` is never called** by the library. Each app must apply it.
+- **Nondeterminism was `init_dyn_mle_max_threads`** (multi-threaded Ceres in the initializer), not OpenCV threads and not ASLR. A FP summation difference produced 326 m vs 1804 m trajectories — the filter is *chaotic* on this data.
+- **`init_max_features`, not `num_pts`,** governs the tracker until initialisation completes. Split across cameras.
+- **`Grider_GRID` masked *after* truncating to top-N by response** — the strongest corners sit on already-tracked features, so cells returned nothing. Filter first, then take top-N.
+- **ROS2 CDR alignment is relative to the message body** (after the 4-byte encapsulation header), and `float64` needs 8-byte alignment. Getting this wrong produced 1e308 IMU values.
+- **COLMAP `ba_refine_principal_point` defaults to 0.** And without `--ImageReader.camera_params` you are measuring COLMAP's initial guess, not a refinement.
+- **Score by interpolating to GT timestamps**, not nearest-neighbour — GT sits on a different phase grid and NN matching throws away 60% of the trajectory.
+- **Never log `static=True` to Rerun** — it hangs viewer 0.33 on images.
+- Always **gravity-gate** a freshly parsed IMU stream (mean |a| ∈ 8.5–11.0) before writing a dataset.
 
 ## 0. Infrastructure — do these first, everything else is unmeasurable without them
 
@@ -67,6 +106,13 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
   - [ ] Vary min angular length, tracking gates (direction, normal alignment, length consistency).
 - [ ] Low-light enhancement: none / CLAHE / Zero-DCE++. **Note:** one team found CLAHE *prevented initialisation entirely* on a dark sequence (0 poses vs 191k). Verify on ours before trusting it.
 - [ ] Image denoise: none vs `medianBlur` k=3 (used by the OKVIS2-X team for dark scenes).
+- [ ] FAST threshold sweep: 5 / 10 / 15 / 20. (On Hilti frames, th=15 gives ~1600–2500 raw corners; th=5 gives ~9000.)
+- [ ] Detection cadence: every frame vs keyframes only.
+- [ ] Non-max suppression radius / `min_px_dist`: 8 / 15 / 25.
+- [ ] Response type: FAST score vs Harris ordering inside a bucket.
+- [ ] Pyramid levels for detection and for KLT (independent knobs).
+- [ ] Sub-pixel refinement on/off, window size.
+- [ ] Per-camera feature budget split: equal vs weighted toward whichever camera is better conditioned.
 
 ## 3. Frontend — Tracking & Matching
 
@@ -78,6 +124,11 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 - [ ] Track-length reweighting on/off.
 - [ ] Inverse-depth reweighting on/off (down-weight distant, low-parallax points).
 - [ ] Playback rate: full speed vs 0.5×. One team found the tracker silently degraded when the CPU couldn't keep up — 16–23 fps against a 30 Hz stream shortened every track. Check we're not doing this.
+- [ ] KLT window size 15/21/31 and pyramid depth 3/4/5.
+- [ ] Forward-backward consistency check on/off, threshold sweep.
+- [ ] Max track length / forced re-detection interval.
+- [ ] Track re-identification across breaks (descriptor re-association) — #13's named limitation.
+- [ ] Match search radius from gyro-predicted position vs fixed radius.
 
 ## 4. Rig / Multi-Camera
 
@@ -90,6 +141,10 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 - [ ] Test the inverse hypothesis: **weight cam1 higher during high-gyro moments.** Nobody does this. During a turn the front sweeps features out while the rear sweeps them in.
 - [ ] Baseline (4 cm) as hard metric constraint vs soft prior vs unused.
 - [ ] Measure how often cam1 actually contributes a constraint that cam0 could not. This tells us what the rig is really worth.
+- [ ] Extrinsic perturbation study: inject 0.5°/1°/2° and 1/5/10 mm errors, measure score sensitivity. Tells us how much calibration accuracy is actually worth.
+- [ ] Baseline scale sweep: 3.9 / 4.01 / 4.1 cm — how sensitive is metric scale?
+- [ ] Per-sequence vs global extrinsics (L#2 found drift between runs).
+- [ ] Fraction of accepted loops that are cross-camera — the number that says what the rig is worth.
 
 ## 5. IMU & Initialisation
 
@@ -102,6 +157,12 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 - [ ] ZUPT on/off. Expect useless — three teams independently reported no stationary segments in continuous walking.
 - [ ] Gyro-only rotation prior vs full IMU coupling.
 - [ ] **Accelerometer health gate:** our accel failed its test (integrating it was *worse* than assuming constant velocity, 25 cm vs 14 cm per 1 s window). Re-test after the static + 6-face recording before trusting it for scale.
+- [ ] Use the official Hilti noise densities (accel 2.86e-3, gyro 4.70e-4) vs inflated vs our guesses.
+- [ ] Noise scaling sweep ×0.5 / ×1 / ×2 / ×5 around the official values.
+- [ ] Gravity magnitude: 9.81 vs locally correct value.
+- [ ] Initial bias: zero vs estimated from the first stationary window.
+- [ ] Backward IMU dead-reckoning to fill the pre-init prefix (#14's coverage trick) — coverage is a hard gate.
+- [ ] Init disparity threshold sweep; measure init latency per sequence.
 
 ## 6. Rolling Shutter — *zero SLAM-track teams do this*
 
@@ -120,6 +181,11 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 - [ ] Sliding-window size / clone count sweep.
 - [ ] Marginalisation strategy.
 - [ ] Gravity-aligned **height rejection** of geometrically impossible landmarks (rank 1's floor-aware filter). Geometric, no semantics.
+- [ ] chi2 multiplier sweep for MSCKF and SLAM updates.
+- [ ] Number of SLAM landmarks kept in state: 25 / 50 / 100.
+- [ ] Feature marginalisation policy: max track length before forced use.
+- [ ] FEJ on/off.
+- [ ] Update decimation: track at 30 Hz, update at 10/15/30 Hz.
 
 ## 8. Loop Closure
 
@@ -131,6 +197,10 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 - [ ] Rejection budget for weak loops — one team measured loop closure helping 3 of 5 sequences and *hurting* 2. Gate hard.
 - [ ] **Measure what fraction of accepted loops are cross-camera.** This is the number that says whether the rig earns its keep.
 - [ ] False-loop rejection on repetitive structure (white walls, identical corridors) — the dominant reported failure, not distortion.
+- [ ] Verification thresholds: min inliers, min score, temporal gap.
+- [ ] Loop acceptance rate and false-positive audit against GT (we can label true revisits from GT positions).
+- [ ] Descriptor on raw fisheye vs on a gravity-aligned crop.
+- [ ] Effect of loop closure on the *hard* sequences specifically, not the aggregate.
 
 ## 9. Online Sliding-Window VI-BA + Global Refinement
 
@@ -155,6 +225,9 @@ Status key: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (reas
 - [ ] Minimum parallax / triangulation-angle gate sweep. This alone should reject rig-attached features as landmarks without any mask.
 - [ ] IMU-PARSAC outlier rejection (used by the Basalt team specifically for the moving operator and flickering lights).
 - [ ] Robust kernels vs masking for transient dynamics — verify the standard machinery is enough.
+- [ ] Person-mask coverage stats per sequence (Hilti run_2: cam0 2.8% mean / 83% max, cam1 5.9% / 28%).
+- [ ] Does masking help calibration but hurt tracking? Test the two stages independently.
+- [ ] Low-light enhancement interaction with init (#14 saw CLAHE prevent init entirely).
 
 ## 11. The Bet — Rotation-First Estimation
 
