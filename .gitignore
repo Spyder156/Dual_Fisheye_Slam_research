@@ -24,3 +24,5 @@ __pycache__/
 *.log
 .DS_Store
 *.rrd
+SLAM/colmap_build/
+SLAM/colmap_src/
