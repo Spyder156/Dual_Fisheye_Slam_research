@@ -81,7 +81,19 @@ Raw fisheye · EUCM-family model · **equal-area angular feature selection** · 
 ## 1. Camera Model & Calibration
 
 - [ ] Fit **EUCM** and **Double Sphere** numerically to our validated factory Mei (sample bearings → project → least squares). Measure px residual. If < 0.2 px we lose nothing by switching.
-- [ ] Add **Mei / UCM / EUCM / Double Sphere** to COLMAP's model registry (`src/colmap/sensor/models.h`) — COLMAP ships none of them.
+- [x] **COLMAP already ships EUCM.** Only Mei and Double Sphere were missing.
+- [x] **Mei (UCM+radtan) implemented in COLMAP** — `SLAM/colmap_mods/`, built in the `fisheye-slam` image. Jacobian via Ceres Jets (exact autodiff). Verified: projection→unprojection round-trips to machine precision, 5°–85°.
+- [x] **Image-based model bake-off done** (619 frame-pairs, floor_EG_run_2, all seeded + BA-refined):
+
+  | model | params | images | points | reproj px |
+  |---|---|---|---|---|
+  | EUCM | 6 | 1200 | 125616 | **0.879** |
+  | MEI | 9 | 1200 | **125908** | 0.882 |
+  | THIN_PRISM | 12 | 1195 | 124698 | 0.876 |
+  | KB4 | 8 | 1193 | 125636 | 0.891 |
+  | FOV | 5 | 1200 | 124811 | 0.973 |
+
+  **Conclusion: EUCM or Mei, either works. The camera model is NOT the bottleneck** — total spread across five models is 0.88→0.97 px. Stop optimising here.
 - [ ] Model bake-off via COLMAP: masked frames, same images, each model, compare converged reprojection error + registered-image count + track length.
   - [ ] Guard against overfitting: more params always fits better. Compare on **held-out images**, or use BIC/AIC.
 - [ ] Measure the **actual per-lens FOV in the 2944×2880 video crop**. We still don't know it, and it bounds everything.
