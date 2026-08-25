@@ -26,3 +26,5 @@ __pycache__/
 *.rrd
 SLAM/colmap_build/
 SLAM/colmap_src/
+SLAM/okvis2_build/
+SLAM/okvis2/

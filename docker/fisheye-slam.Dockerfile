@@ -65,6 +65,7 @@ RUN printf '%s\n' \
     '  -DUSE_SYSTEM_CERES=ON \' \
     '  -DBUILD_APPS=ON \' \
     '  -DUSE_NN=OFF \' \
+    '  -DHAVE_LIBREALSENSE=OFF \' \
     '  -DBUILD_TESTS=OFF' \
     'ninja -C /okvis_build -j"$(nproc)"' \
     'ls /okvis_build/okvis_apps/ 2>/dev/null | head' \
