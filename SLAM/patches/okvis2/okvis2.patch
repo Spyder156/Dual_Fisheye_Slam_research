@@ -1,0 +1,174 @@
+diff --git a/external/DBoW2 b/external/DBoW2
+--- a/external/DBoW2
++++ b/external/DBoW2
+@@ -1 +1 @@
+-Subproject commit 3924753db6145f12618e7de09b7e6b258db93c6e
++Subproject commit 3924753db6145f12618e7de09b7e6b258db93c6e-dirty
+diff --git a/external/opengv b/external/opengv
+--- a/external/opengv
++++ b/external/opengv
+@@ -1 +1 @@
+-Subproject commit 91f4b19c73450833a40e463ad3648aae80b3a7f3
++Subproject commit 91f4b19c73450833a40e463ad3648aae80b3a7f3-dirty
+diff --git a/okvis_common/include/okvis/Parameters.hpp b/okvis_common/include/okvis/Parameters.hpp
+index 2400af7..d1989bb 100644
+--- a/okvis_common/include/okvis/Parameters.hpp
++++ b/okvis_common/include/okvis/Parameters.hpp
+@@ -66,6 +66,11 @@ struct CameraCalibration {
+   std::string distortionType;
+ 
+   cameras::NCameraSystem::CameraType cameraType; ///< Some additional info about the camera.
++
++  /// \brief Optional path to a validity mask (OpenCV convention: 0 == masked,
++  /// nonzero == valid). Needed for fisheye lenses, where the image corners lie
++  /// outside the image circle and carry no valid projection.
++  std::string imageMask;
+ };
+ 
+ /*!
+diff --git a/okvis_common/src/ViParametersReader.cpp b/okvis_common/src/ViParametersReader.cpp
+index 00a9451..5b1cb24 100644
+--- a/okvis_common/src/ViParametersReader.cpp
++++ b/okvis_common/src/ViParametersReader.cpp
+@@ -47,6 +47,8 @@
+ #include <okvis/cameras/RadialTangentialDistortion8.hpp>
+ 
+ #include <opencv2/core/core.hpp>
++#include <opencv2/imgcodecs.hpp>
++#include <opencv2/imgproc.hpp>
+ 
+ #include <okvis/ViParametersReader.hpp>
+ 
+@@ -64,9 +66,37 @@ ViParametersReader::ViParametersReader(const std::string& filename) {
+   readConfigFile(filename);
+ }
+ 
++namespace {
++/// \brief Apply an optional validity mask to a camera geometry.
++/// OpenCV/OKVIS convention: 0 == masked (invalid), nonzero == valid. This is
++/// the INVERSE of OpenVINS, where nonzero means "ignore" -- convert when
++/// sharing a mask file between the two.
++template<typename CamT>
++void applyMask(std::shared_ptr<CamT>& cam, const okvis::CameraCalibration& calib,
++               size_t camIdx) {
++  if (calib.imageMask.empty()) {
++    return;
++  }
++  cv::Mat m = cv::imread(calib.imageMask, cv::IMREAD_GRAYSCALE);
++  if (m.empty()) {
++    LOG(FATAL) << "camera " << camIdx << ": could not read image_mask "
++               << calib.imageMask;
++  }
++  if (m.cols != int(cam->imageWidth()) || m.rows != int(cam->imageHeight())) {
++    cv::resize(m, m, cv::Size(int(cam->imageWidth()), int(cam->imageHeight())),
++               0, 0, cv::INTER_NEAREST);
++  }
++  OKVIS_ASSERT_TRUE(std::runtime_error, cam->setMask(m),
++                    "camera " << camIdx << ": setMask failed")
++  LOG(INFO) << "camera " << camIdx << ": mask " << calib.imageMask << " -- "
++            << cv::countNonZero(m) << "/" << (m.rows * m.cols) << " px valid";
++}
++}  // namespace
++
+ // Read and parse a config file.
+ void ViParametersReader::readConfigFile(const std::string& filename) {
+ 
++
+   // reads
+   cv::FileStorage file(filename, cv::FileStorage::READ);
+ 
+@@ -103,6 +133,7 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
+                     calibrations[i].distortionCoefficients[3])/*, id ?*/));
+       cam->initialiseUndistortMaps(); // set up undistorters
+       cam->initialiseCameraAwarenessMaps();
++      applyMask(cam, calibrations[i], camIdx);
+       viParameters_.nCameraSystem.addCamera(
+           T_SC_okvis_ptr,
+           std::static_pointer_cast<const cameras::CameraBase>(cam),
+@@ -130,6 +161,7 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
+                     calibrations[i].distortionCoefficients[3])/*, id ?*/));
+       cam->initialiseUndistortMaps(); // set up undistorters
+       cam->initialiseCameraAwarenessMaps();
++      applyMask(cam, calibrations[i], camIdx);
+       viParameters_.nCameraSystem.addCamera(
+           T_SC_okvis_ptr,
+           std::static_pointer_cast<const cameras::CameraBase>(cam),
+@@ -160,6 +192,7 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
+                     calibrations[i].distortionCoefficients[7])/*, id ?*/));
+       cam->initialiseUndistortMaps(); // set up undistorters
+       cam->initialiseCameraAwarenessMaps();
++      applyMask(cam, calibrations[i], camIdx);
+       viParameters_.nCameraSystem.addCamera(
+           T_SC_okvis_ptr,
+           std::static_pointer_cast<const cameras::CameraBase>(cam),
+@@ -432,6 +465,10 @@ bool ViParametersReader::getCalibrationViaConfig(
+       calib.focalLength << focalLengthNode[0], focalLengthNode[1];
+       calib.principalPoint << principalPointNode[0], principalPointNode[1];
+       calib.distortionType = std::string((*it)["distortion_type"]);
++      // optional per-camera validity mask (fisheye image circle)
++      if ((*it)["image_mask"].isString()) {
++        calib.imageMask = std::string((*it)["image_mask"]);
++      }
+ 
+       // parse additional stuff
+       if((*it)["camera_type"].isString()){
+diff --git a/okvis_cv/include/okvis/cameras/implementation/CameraBase.hpp b/okvis_cv/include/okvis/cameras/implementation/CameraBase.hpp
+index 184d7af..59cb1b3 100644
+--- a/okvis_cv/include/okvis/cameras/implementation/CameraBase.hpp
++++ b/okvis_cv/include/okvis/cameras/implementation/CameraBase.hpp
+@@ -38,6 +38,8 @@
+ 
+ #pragma once
+ 
++#include <cmath>
++
+ #include <okvis/cameras/CameraBase.hpp>
+ 
+ /// \brief okvis Main namespace of this package.
+@@ -96,6 +98,14 @@ bool CameraBase::isMasked(const Eigen::Vector2d& imagePoint) const
+ // Check if the keypoint is in the image.
+ bool CameraBase::isInImage(const Eigen::Vector2d& imagePoint) const
+ {
++  // FIX: NaN fails every comparison below, so a NaN point would be reported as
++  // "in image" and then isMasked() would index mask_ with int(NaN) -- undefined
++  // behaviour, in practice a segfault. computeOverlaps() does produce NaN
++  // projections for fisheye rays near the rim, so this fires as soon as any
++  // mask is set on a fisheye camera.
++  if (!std::isfinite(imagePoint[0]) || !std::isfinite(imagePoint[1])) {
++    return false;
++  }
+   if (imagePoint[0] < 0.0 || imagePoint[1] < 0.0) {
+     return false;
+   }
+diff --git a/okvis_cv/src/NCameraSystem.cpp b/okvis_cv/src/NCameraSystem.cpp
+index 59413bb..5c9f0b2 100644
+--- a/okvis_cv/src/NCameraSystem.cpp
++++ b/okvis_cv/src/NCameraSystem.cpp
+@@ -84,7 +84,14 @@ void NCameraSystem::computeOverlaps()
+           for (size_t v = 0; v < height; ++v) {
+             // backproject
+             Eigen::Vector3d ray_C;
+-            camera->backProject(Eigen::Vector2d(double(u), double(v)), &ray_C);
++            // FIX: honour the return value. For a fisheye (KB4) the image
++            // corners lie outside the valid image circle (r~1025 px vs ~720 px)
++            // and have no valid unprojection; the ray is then garbage. Using it
++            // marked 6213 pixels as "overlapping" between two cameras pointing
++            // in OPPOSITE directions, so OKVIS2 ran stereo matching front<->rear.
++            if (!camera->backProject(Eigen::Vector2d(double(u), double(v)), &ray_C)) {
++              continue;
++            }
+             // project into other camera
+             Eigen::Vector3d ray_Cother = T_Cother_C.C() * ray_C;
+             // points at infinity, i.e. we only do rotation
+@@ -96,7 +103,10 @@ void NCameraSystem::computeOverlaps()
+             if (status == ProjectionStatus::Successful) {
+ 
+               Eigen::Vector3d verificationRay;
+-              otherCamera->backProject(imagePointInOtherCamera,&verificationRay);
++              if (!otherCamera->backProject(imagePointInOtherCamera,
++                                            &verificationRay)) {
++                continue;   // FIX: same unchecked return value as above
++              }
+ 
+               // to avoid an artefact of some distortion models, check again
+               // note: (this should be fixed in the distortion implementation)
