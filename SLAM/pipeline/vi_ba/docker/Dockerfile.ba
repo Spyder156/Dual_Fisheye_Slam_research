@@ -1,0 +1,59 @@
+# COLMAP + Ceres + our IMU-coupled bundle adjuster.
+#
+# Unlike the dev image this one BUILDS colmap_vi_ba into the image rather than
+# bind-mounting a source tree, so the image is self-contained and the runner can
+# call `colmap_vi_ba` directly.
+#
+# vendor/colmap is a patched COLMAP: its CMakeLists gains
+#   add_executable(colmap_vi_ba ../tools/vi_bundle_adjuster.cc)
+# so the adjuster builds as part of the normal COLMAP build.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git cmake ninja-build build-essential ccache pkg-config ca-certificates \
+    libeigen3-dev libboost-regex-dev libboost-filesystem-dev \
+    libboost-date-time-dev libboost-program-options-dev \
+    libboost-serialization-dev libboost-graph-dev \
+    libflann-dev libfreeimage-dev libopenimageio-dev openimageio-tools \
+    libsuitesparse-dev libcurl4-openssl-dev libcrypto++-dev libmetis-dev \
+    libgoogle-glog-dev libgflags-dev libgtest-dev libsqlite3-dev \
+    libceres-dev libcgal-dev libopencv-dev libglew-dev qtbase5-dev \
+    libqt5opengl5-dev python3 python3-numpy \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY vendor/colmap /src/colmap
+COPY vendor/vi_ba  /src/tools
+
+# the CMakeLists refers to ../tools/vi_bundle_adjuster.cc relative to colmap/
+#
+# colmap_main, NOT colmap_exe. colmap_exe is the static library of exe/ sources
+# (libcolmap_exe.a) -- building it succeeds, links a .a, and produces no binary.
+# The copy that followed was `|| true`, so that failure was silent and the image
+# shipped with no colmap on PATH; the runner then died with "colmap not found"
+# on the first stage that needed it. Both the target and the `|| true` are fixed
+# here: if the binary is missing the BUILD fails, not the batch.
+#
+# libonnxruntime is installed before /src/build is deleted. COLMAP 3.12
+# FetchContent-downloads a prebuilt onnxruntime and links it SHARED without
+# installing it, so deleting the build tree leaves `colmap` unable to start at
+# all -- "error while loading shared libraries: libonnxruntime.so.1". colmap_vi_ba
+# does not link it and so kept working, which is exactly why this stayed hidden.
+RUN cmake -S /src/colmap -B /src/build -GNinja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DGUI_ENABLED=OFF -DCUDA_ENABLED=OFF -DTESTS_ENABLED=OFF \
+ && ninja -C /src/build colmap_vi_ba colmap_main \
+ && BIN="$(find /src/build -name colmap -type f -executable | head -1)" \
+ && test -n "$BIN" && cp "$BIN" /usr/local/bin/colmap \
+ && find /src/build -name 'colmap_vi_ba' -type f -executable \
+      -exec cp {} /usr/local/bin/colmap_vi_ba \; \
+ && test -x /usr/local/bin/colmap_vi_ba \
+ && ORT="$(find /src/build -name 'libonnxruntime.so*' | head -1)" \
+ && test -n "$ORT" \
+ && cp -a "$(dirname "$ORT")"/libonnxruntime*.so* /usr/local/lib/ \
+ && ldconfig \
+ && rm -rf /src/build /src/colmap \
+ && colmap --version \
+ && colmap_vi_ba 2>&1 | head -1
+
+WORKDIR /work
