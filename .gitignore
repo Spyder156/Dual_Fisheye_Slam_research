@@ -6,25 +6,31 @@ Relevant_Papers/
 # Proprietary — do not commit
 MediaSDK/
 
-# Local builds of third-party code
+# --- SLAM tree -------------------------------------------------------------
+# Upstream repos: cloned, never vendored. Our changes live in SLAM/patches/.
+SLAM/third_party/
+# Build trees
+SLAM/build/
 ThirdParty/
 
-# Cloned SLAM repos (tracked as clones, not vendored) — but keep our own dirs
-SLAM/*/
-!SLAM/configs/
-!SLAM/openvins_mods/
-!SLAM/results/
-SLAM/ws_openvins/
+# Experiment outputs: keep the small text results, never the recordings/clouds
+SLAM/experiments/**/*.rrd
+SLAM/experiments/**/*.jpg
+SLAM/experiments/**/*.png
+SLAM/experiments/**/points.csv
+SLAM/experiments/**/traj.csv
+SLAM/experiments/**/stats.csv
+SLAM/experiments/**/*.bin
+SLAM/experiments/**/*.db
 
 # Python
 __pycache__/
 *.pyc
+SLAM/experiments/**/*.ply
+SLAM/experiments/**/*.csv
 
-# Misc
-*.log
-.DS_Store
-*.rrd
-SLAM/colmap_build/
-SLAM/colmap_src/
-SLAM/okvis2_build/
-SLAM/okvis2/
+# local agent config
+.claude/
+
+# separate project, not part of this repo
+open-insv-gpu/
