@@ -1,0 +1,3 @@
+ATE RMSE : 20.3065 m
+coverage : 97.07 %
+SCORE    : 2.16
