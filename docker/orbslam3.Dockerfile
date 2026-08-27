@@ -10,7 +10,7 @@
 FROM ubuntu:20.04
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential cmake git wget unzip pkg-config \
+    build-essential cmake git wget unzip pkg-config ca-certificates \
     libeigen3-dev libboost-serialization-dev libssl-dev \
     libgl1-mesa-dev libglew-dev libepoxy-dev \
     libavcodec-dev libavformat-dev libswscale-dev \
@@ -25,8 +25,9 @@ RUN cd /tmp && wget -q https://github.com/opencv/opencv/archive/4.5.4.zip \
     && make -j"$(nproc)" && make install && ldconfig \
     && rm -rf /tmp/opencv-4.5.4 /tmp/4.5.4.zip
 
-# Pangolin (v0.8 builds cleanly on 20.04)
-RUN cd /tmp && git clone --depth 1 --branch v0.8 https://github.com/stevenlovegrove/Pangolin.git \
+# Pangolin v0.6 -- v0.8 bundles a sigslot header that needs GCC>=10; 20.04 has 9.4,
+# and ORB-SLAM3 upstream pairs with v0.6 anyway.
+RUN cd /tmp && git clone --depth 1 --branch v0.6 https://github.com/stevenlovegrove/Pangolin.git \
     && cd Pangolin && mkdir build && cd build \
     && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=OFF .. \
     && make -j"$(nproc)" && make install && ldconfig \

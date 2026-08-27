@@ -31,6 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4-openssl-dev liblz4-dev libsuitesparse-dev \
     libopenimageio-dev libopenimageio2.4t64 openimageio-tools libopencv-dev \
     libatlas-base-dev libopenblas-openmp-dev libboost-filesystem-dev \
+    libgeographiclib-dev libpcl-dev \
+    libboost-all-dev libtbb-dev libfmt-dev libglfw3-dev libepoxy-dev \
+    curl zip unzip bison flex libtool libtool-bin ca-certificates libxinerama-dev libxcursor-dev libxi-dev libxrandr-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # RTX 5070 Ti is compute capability 12.0 (Blackwell)
