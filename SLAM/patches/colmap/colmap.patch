@@ -1,0 +1,263 @@
+diff --git a/src/colmap/sensor/models.h b/src/colmap/sensor/models.h
+index 224cc51..359522c 100644
+--- a/src/colmap/sensor/models.h
++++ b/src/colmap/sensor/models.h
+@@ -107,7 +107,8 @@ MAKE_ENUM_CLASS_OVERLOAD_STREAM(CameraModelId,
+                                 kSimpleFisheye,           // = 14
+                                 kFisheye,                 // = 15
+                                 kEUCM,                    // = 16
+-                                kEquirectangular          // = 17
++                                kEquirectangular,         // = 17
++                                kMei                      // = 18
+ );
+ 
+ // Definitions shared by all camera models (perspective and spherical alike).
+@@ -229,7 +230,8 @@ MAKE_ENUM_CLASS_OVERLOAD_STREAM(CameraModelId,
+   CAMERA_MODEL_CASE(DivisionCameraModel)            \
+   CAMERA_MODEL_CASE(SimpleFisheyeCameraModel)       \
+   CAMERA_MODEL_CASE(FisheyeCameraModel)             \
+-  CAMERA_MODEL_CASE(EUCMCameraModel)
++  CAMERA_MODEL_CASE(EUCMCameraModel)              \
++  CAMERA_MODEL_CASE(MeiCameraModel)
+ #endif
+ 
+ #ifndef SPHERICAL_CAMERA_MODEL_CASES
+@@ -766,6 +768,29 @@ struct EUCMCameraModel
+                                          T max_extra_param);
+ };
+ 
++// Mei (Unified Camera Model) with radial-tangential distortion.
++//
++// Also known as "omni-radtan" (Kalibr). Projects onto a unit sphere, then
++// through a pinhole displaced by xi along the optical axis, then applies
++// OpenCV-style radial-tangential distortion.
++//
++//      C. Mei and P. Rives, "Single View Point Omnidirectional Camera
++//      Calibration from Planar Grids", ICRA 2007.
++//
++//   Parameter list is expected in the following order:
++//
++//      fx, fy, cx, cy, xi, k1, k2, p1, p2
++//
++struct MeiCameraModel
++    : public BasePerspectivePinholeCameraModel<MeiCameraModel> {
++  PERSPECTIVE_CAMERA_MODEL_DEFINITIONS(
++      CameraModelId::kMei, "MEI", 2, 2, 5, true)
++
++  template <typename T>
++  static inline bool HasBogusExtraParams(const std::vector<T>& params,
++                                         T max_extra_param);
++};
++
+ // Equirectangular (spherical panorama) camera model.
+ //
+ // Maps the full 360°x180° sphere onto an equirectangular image: the azimuth
+@@ -2831,6 +2856,144 @@ bool EUCMCameraModel::CamFromImg(const double* params,
+   return true;
+ }
+ 
++////////////////////////////////////////////////////////////////////////////////
++// MeiCameraModel
++
++std::string MeiCameraModel::InitializeParamsInfo() {
++  return "fx, fy, cx, cy, xi, k1, k2, p1, p2";
++}
++
++std::array<size_t, 2> MeiCameraModel::InitializeFocalLengthIdxs() {
++  return {0, 1};
++}
++
++std::array<size_t, 2> MeiCameraModel::InitializePrincipalPointIdxs() {
++  return {2, 3};
++}
++
++std::array<size_t, 5> MeiCameraModel::InitializeExtraParamsIdxs() {
++  return {4, 5, 6, 7, 8};
++}
++
++template <typename T>
++bool MeiCameraModel::HasBogusExtraParams(const std::vector<T>& params,
++                                         const T max_extra_param) {
++  // xi lives in params[4] and is a geometry parameter, not a distortion
++  // coefficient, so it must not be checked against max_extra_param. Only the
++  // radtan coefficients (5..8) are bounded that way.
++  const T xi = params[4];
++  if (xi < T(0) || xi > T(5)) {
++    return true;
++  }
++  for (size_t i = 5; i <= 8; ++i) {
++    if (ceres::abs(params[i]) > max_extra_param) {
++      return true;
++    }
++  }
++  return false;
++}
++
++std::vector<double> MeiCameraModel::InitializeParams(const double focal_length,
++                                                     const size_t width,
++                                                     const size_t height) {
++  // xi = 1 is the classic equi-angular-ish starting point; with it the UCM
++  // focal is roughly (1 + xi) x the pinhole-equivalent focal.
++  return {2.0 * focal_length, 2.0 * focal_length, width / 2.0, height / 2.0,
++          1.0, 0.0, 0.0, 0.0, 0.0};
++}
++
++template <typename T>
++void MeiCameraModel::Distortion(
++    const T* extra_params, const T& u, const T& v, T* du, T* dv) {
++  // extra_params = [xi, k1, k2, p1, p2]; xi is handled in ImgFromCam.
++  const T k1 = extra_params[1];
++  const T k2 = extra_params[2];
++  const T p1 = extra_params[3];
++  const T p2 = extra_params[4];
++
++  const T u2 = u * u;
++  const T uv = u * v;
++  const T v2 = v * v;
++  const T r2 = u2 + v2;
++  const T radial = k1 * r2 + k2 * r2 * r2;
++  *du = u * radial + T(2) * p1 * uv + p2 * (r2 + T(2) * u2);
++  *dv = v * radial + p1 * (r2 + T(2) * v2) + T(2) * p2 * uv;
++}
++
++template <typename T>
++bool MeiCameraModel::ImgFromCam(const T* params,
++                                const T& u,
++                                const T& v,
++                                const T& w,
++                                T* x,
++                                T* y,
++                                const bool check_cheirality) {
++  const T f1 = params[0];
++  const T f2 = params[1];
++  const T c1 = params[2];
++  const T c2 = params[3];
++  const T xi = params[4];
++
++  // Project onto the unit sphere.
++  const T d = ceres::sqrt(u * u + v * v + w * w);
++  if (d < T(std::numeric_limits<double>::epsilon())) {
++    return false;
++  }
++  // Pinhole displaced by xi: valid while (w/d + xi) > 0.
++  const T den = w + xi * d;
++  if (!HasProjectableDepth(den, check_cheirality)) {
++    return false;
++  }
++
++  const T mx = u / den;
++  const T my = v / den;
++
++  T du, dv;
++  Distortion(&params[4], mx, my, &du, &dv);
++  *x = mx + du;
++  *y = my + dv;
++
++  *x = f1 * *x + c1;
++  *y = f2 * *y + c2;
++
++  return true;
++}
++
++bool MeiCameraModel::CamFromImg(const double* params,
++                                const double x,
++                                const double y,
++                                double* u,
++                                double* v) {
++  const double f1 = params[0];
++  const double f2 = params[1];
++  const double c1 = params[2];
++  const double c2 = params[3];
++  const double xi = params[4];
++
++  // Remove K, then undo the radtan distortion iteratively.
++  *u = (x - c1) / f1;
++  *v = (y - c2) / f2;
++  IterativeUndistortion(&params[4], u, v);
++
++  // Lift from the normalized plane back onto the unit sphere, then express the
++  // result as a normalized-plane point of the *undisplaced* pinhole so the rest
++  // of COLMAP (which expects a 2D normalized point) stays consistent.
++  const double r2 = *u * *u + *v * *v;
++  const double disc = 1.0 + (1.0 - xi * xi) * r2;
++  if (disc < 0.0) {
++    return false;
++  }
++  const double factor = (xi + std::sqrt(disc)) / (1.0 + r2);
++  const double zs = factor - xi;
++  if (zs < std::numeric_limits<double>::epsilon()) {
++    return false;
++  }
++  *u = factor * *u / zs;
++  *v = factor * *v / zs;
++
++  return true;
++}
++
+ ////////////////////////////////////////////////////////////////////////////////
+ // EquirectangularCameraModel
+ 
+diff --git a/src/colmap/sensor/models_jacobian.h b/src/colmap/sensor/models_jacobian.h
+index a6ebd11..da608e7 100644
+--- a/src/colmap/sensor/models_jacobian.h
++++ b/src/colmap/sensor/models_jacobian.h
+@@ -1409,6 +1409,59 @@ bool DivisionCameraModel::ImgFromCamWithJac(const double* params,
+   return true;
+ }
+ 
++////////////////////////////////////////////////////////////////////////////////
++// MeiCameraModel
++//
++// Derivatives are obtained with Ceres Jets rather than hand-derived closed
++// forms. For a 9-parameter model that is far less error-prone, and the result
++// is exact (autodiff, not finite differences). Layout matches the convention
++// verified by models_jacobian_test.cc: row-major, params block then uvw block.
++
++template <bool Enable, typename std::enable_if<Enable, int>::type>
++bool MeiCameraModel::ImgFromCamWithJac(const double* params,
++                                       const double& u,
++                                       const double& v,
++                                       const double& w,
++                                       double* x,
++                                       double* y,
++                                       double* J_params,
++                                       double* J_uvw,
++                                       const bool check_cheirality) {
++  constexpr int kNumParams = static_cast<int>(num_params);
++  constexpr int kNumDerivs = kNumParams + 3;
++  using JetT = ceres::Jet<double, kNumDerivs>;
++
++  JetT params_jet[kNumParams];
++  for (int i = 0; i < kNumParams; ++i) {
++    params_jet[i] = JetT(params[i], i);
++  }
++  JetT u_jet(u, kNumParams);
++  JetT v_jet(v, kNumParams + 1);
++  JetT w_jet(w, kNumParams + 2);
++
++  JetT x_jet, y_jet;
++  if (!ImgFromCam(params_jet, u_jet, v_jet, w_jet, &x_jet, &y_jet,
++                  check_cheirality)) {
++    return false;
++  }
++
++  *x = x_jet.a;
++  *y = y_jet.a;
++  if (J_params != nullptr) {
++    for (int i = 0; i < kNumParams; ++i) {
++      J_params[i] = x_jet.v[i];
++      J_params[kNumParams + i] = y_jet.v[i];
++    }
++  }
++  if (J_uvw != nullptr) {
++    for (int i = 0; i < 3; ++i) {
++      J_uvw[i] = x_jet.v[kNumParams + i];
++      J_uvw[3 + i] = y_jet.v[kNumParams + i];
++    }
++  }
++  return true;
++}
++
+ template <bool Enable, typename std::enable_if<Enable, int>::type>
+ bool EUCMCameraModel::ImgFromCamWithJac(const double* params,
+                                         const double& u,
