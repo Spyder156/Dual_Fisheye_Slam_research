@@ -1,0 +1,252 @@
+/*
+ * run_folder: ROS-free OpenVINS runner for an image-folder + imu.csv dataset
+ * (project-local extension for the Insta360 dual-fisheye rig).
+ *
+ * Dataset layout (produced by scripts/extract_insv.py):
+ *   <dir>/imu.csv      t,gx,gy,gz,ax,ay,az   (rad/s, m/s^2)
+ *   <dir>/frames.csv   frame,t               (1-indexed, cam0 timeline)
+ *   <dir>/cam0/%06d.jpg [cam1/%06d.jpg]
+ *
+ * Usage: run_folder <estimator_config.yaml> <dataset_dir> <out_traj.csv> [viz_dir]
+ *   viz_dir: if given, dump the feature-track visualization every 30 frames
+ */
+
+#include <cstdio>
+#include <fstream>
+#include <iomanip>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <opencv2/opencv.hpp>
+
+#include "core/VioManager.h"
+#include "core/VioManagerOptions.h"
+#include "state/Propagator.h"
+#include "state/State.h"
+#include "utils/opencv_yaml_parse.h"
+#include "utils/quat_ops.h"
+#include "utils/sensor_data.h"
+
+using namespace ov_msckf;
+
+namespace ov_msckf {
+extern double g_vision_noise_mult;
+extern double g_last_reproj_rms;
+extern int g_last_reproj_n;
+}
+namespace ov_core {
+extern double g_rs_readout_s;
+extern Eigen::Vector3d g_rs_w_cam[4];
+}
+
+int main(int argc, char **argv) {
+
+  if (argc != 4 && argc != 5) {
+    printf("usage: %s <estimator_config.yaml> <dataset_dir> <out_traj.csv> [viz_dir]\n", argv[0]);
+    return 1;
+  }
+  std::string config_path = argv[1];
+  std::string dir = argv[2];
+  std::string out_path = argv[3];
+  std::string viz_dir = (argc == 5) ? argv[4] : "";
+
+  auto parser = std::make_shared<ov_core::YamlParser>(config_path);
+  std::string verbosity = "INFO";
+  parser->parse_config("verbosity", verbosity, false);
+  ov_core::Printer::setPrintLevel(verbosity);
+
+  VioManagerOptions params;
+  params.print_and_load(parser);
+  // NOTE: the library parses num_opencv_threads but never applies it; each app must.
+  // 0 disables OpenCV's threading framework entirely (repeatability), per run_simulation.cpp.
+  cv::setNumThreads(params.num_opencv_threads);
+  printf("opencv threads: %d\n", params.num_opencv_threads);
+  auto app = std::make_shared<VioManager>(params);
+  const char *rs_env = std::getenv("OV_RS_READOUT_MS");
+  ov_core::g_rs_readout_s = (rs_env != nullptr) ? std::atof(rs_env) * 1e-3 : 0.0;
+  printf("rolling-shutter readout: %.1f ms\n", ov_core::g_rs_readout_s * 1e3);
+  std::vector<Eigen::Matrix3d> R_ItoC;
+  for (int c = 0; c < params.state_options.num_cameras; c++)
+    R_ItoC.push_back(ov_core::quat_2_Rot(params.camera_extrinsics.at(c).block(0, 0, 4, 1)));
+  if (!parser->successful()) {
+    printf(RED "unable to parse all parameters, please fix\n" RESET);
+    return 1;
+  }
+
+  // ---- load imu.csv ----
+  std::vector<ov_core::ImuData> imu;
+  {
+    std::ifstream f(dir + "/imu.csv");
+    if (!f.is_open()) {
+      printf("cannot open %s/imu.csv\n", dir.c_str());
+      return 1;
+    }
+    std::string line;
+    std::getline(f, line); // header
+    while (std::getline(f, line)) {
+      std::stringstream ss(line);
+      std::string v;
+      double d[7];
+      for (int i = 0; i < 7; i++) {
+        std::getline(ss, v, ',');
+        d[i] = std::stod(v);
+      }
+      ov_core::ImuData m;
+      m.timestamp = d[0];
+      m.wm << d[1], d[2], d[3];
+      m.am << d[4], d[5], d[6];
+      imu.push_back(m);
+    }
+  }
+  printf("loaded %zu imu samples [%.2f .. %.2f]\n", imu.size(), imu.front().timestamp, imu.back().timestamp);
+
+  // ---- load frame timestamps ----
+  std::vector<double> ftimes;
+  std::vector<int> fidx;
+  {
+    std::ifstream f(dir + "/frames.csv");
+    if (!f.is_open()) {
+      printf("cannot open %s/frames.csv\n", dir.c_str());
+      return 1;
+    }
+    std::string line;
+    std::getline(f, line); // header
+    while (std::getline(f, line)) {
+      std::stringstream ss(line);
+      std::string a, b;
+      std::getline(ss, a, ',');
+      std::getline(ss, b, ',');
+      fidx.push_back(std::stoi(a));
+      ftimes.push_back(std::stod(b));
+    }
+  }
+  int num_cams = params.state_options.num_cameras;
+  printf("%zu frame timestamps, %d cameras\n", ftimes.size(), num_cams);
+
+  std::ofstream out(out_path);
+  out << "t,px,py,pz,qx,qy,qz,qw\n";
+  std::ofstream stats(out_path + ".stats.csv");
+  stats << "t,reproj_rms_px,reproj_feats\n";
+  // Per the run-output contract (SLAM/OUTPUT.md): dump the landmark cloud and
+  // the per-frame tracked keypoints (with stable ids) so the viewer can draw
+  // fading track tails rather than disconnected dots.
+  std::ofstream ptsf(out_path + ".points.csv");
+  ptsf << "t,id,x,y,z\n";
+  std::ofstream kpf(out_path + ".keypoints.csv");
+  kpf << "t,id,u,v,depth\n";
+
+  // ---- main loop: feed imu, and pending camera frames once imu passes them ----
+  size_t fi = 0;
+  int fed = 0, logged = 0;
+  for (const auto &m : imu) {
+    app->feed_measurement_imu(m);
+    while (fi < ftimes.size() && m.timestamp > ftimes[fi] + 0.05) {
+      char name[32];
+      snprintf(name, sizeof(name), "/%06d.jpg", fidx[fi]);
+      ov_core::CameraData cam;
+      cam.timestamp = ftimes[fi];
+      bool ok = true;
+      for (int c = 0; c < num_cams; c++) {
+        cv::Mat img = cv::imread(dir + "/cam" + std::to_string(c) + name, cv::IMREAD_GRAYSCALE);
+        if (img.empty()) {
+          ok = false;
+          break;
+        }
+        if (params.downsample_cameras)
+          cv::resize(img, img, cv::Size(), 0.5, 0.5, cv::INTER_AREA);
+        cam.sensor_ids.push_back(c);
+        cam.images.push_back(img);
+        if (params.use_mask)
+          cam.masks.push_back(params.masks.at(c));
+        else
+          cam.masks.push_back(cv::Mat::zeros(img.rows, img.cols, CV_8UC1));
+      }
+      if (ok) {
+        // gyro-adaptive vision noise: |w| above ~20 deg/s scales sigma linearly
+        {
+          double wmag = m.wm.norm();
+          const double w0 = 0.35; // rad/s
+          g_vision_noise_mult = std::max(1.0, wmag / w0);
+        }
+        for (int c = 0; c < num_cams && c < 4; c++)
+          ov_core::g_rs_w_cam[c] = R_ItoC[c] * m.wm;
+        app->feed_measurement_camera(cam);
+        fed++;
+        if (app->initialized()) {
+          // The filter's state timestamp only advances at the update rate (~10 Hz),
+          // which would give duplicate rows and poor GT coverage. Propagate the
+          // state forward to THIS frame's timestamp so we emit one pose per frame.
+          auto state = app->get_state();
+          Eigen::Matrix<double, 13, 1> sp;
+          Eigen::Matrix<double, 12, 12> cov;
+          double t_out = cam.timestamp;
+          Eigen::Vector4d q;
+          Eigen::Vector3d p;
+          if (app->get_propagator()->fast_state_propagate(state, t_out, sp, cov)) {
+            q = sp.block(0, 0, 4, 1);
+            p = sp.block(4, 0, 3, 1);
+          } else {
+            t_out = state->_timestamp;
+            q = state->_imu->quat();
+            p = state->_imu->pos();
+          }
+          out << std::setprecision(9) << std::fixed << t_out << "," << p(0) << "," << p(1) << "," << p(2) << "," << q(0) << ","
+              << q(1) << "," << q(2) << "," << q(3) << "\n";
+          stats << t_out << "," << g_last_reproj_rms << "," << g_last_reproj_n << "\n";
+          {
+            double t_tr;
+            std::unordered_map<size_t, Eigen::Vector3d> pos, uvd;
+            app->get_active_tracks(t_tr, pos, uvd);
+            for (const auto &kv : pos)
+              ptsf << t_tr << "," << kv.first << "," << kv.second(0) << "," << kv.second(1) << ","
+                   << kv.second(2) << "\n";
+            for (const auto &kv : uvd)
+              kpf << t_tr << "," << kv.first << "," << kv.second(0) << "," << kv.second(1) << ","
+                  << kv.second(2) << "\n";
+          }
+          logged++;
+        }
+        if (fed % 100 == 0)
+          printf("[%d/%zu] init=%d logged=%d\n", fed, ftimes.size(), (int)app->initialized(), logged);
+        static int viz_every = []() {
+          const char *e = std::getenv("OV_VIZ_EVERY");
+          return (e != nullptr) ? std::atoi(e) : 30;
+        }();
+        if (!viz_dir.empty() && fed % viz_every == 0) {
+          cv::Mat viz = app->get_historical_viz_image();
+          if (!viz.empty()) {
+            char vname[64];
+            snprintf(vname, sizeof(vname), "/track_%06d.jpg", fed);
+            cv::imwrite(viz_dir + vname, viz, {cv::IMWRITE_JPEG_QUALITY, 80});
+            static std::ofstream vizcsv(viz_dir + "/viz.csv");
+            static bool hdr = [&]() { vizcsv << "t,file\n"; return true; }();
+            (void)hdr;
+            vizcsv << cam.timestamp << ",track_" << std::setw(6) << std::setfill('0') << fed << ".jpg\n";
+          }
+        }
+      }
+      fi++;
+    }
+  }
+  out.close();
+  printf("done: fed %d frames, logged %d poses -> %s\n", fed, logged, out_path.c_str());
+
+  // final calibration states (useful with online calib enabled)
+  if (app->initialized()) {
+    auto state = app->get_state();
+    for (int c = 0; c < num_cams; c++) {
+      if (state->_cam_intrinsics.find(c) != state->_cam_intrinsics.end()) {
+        std::cout << "cam" << c << " intrinsics: " << state->_cam_intrinsics.at(c)->value().transpose() << std::endl;
+      }
+      if (state->_calib_IMUtoCAM.find(c) != state->_calib_IMUtoCAM.end()) {
+        std::cout << "cam" << c << " T_ItoC: " << state->_calib_IMUtoCAM.at(c)->value().transpose() << std::endl;
+      }
+    }
+    if (state->_calib_dt_CAMtoIMU != nullptr) {
+      std::cout << "t_off cam-imu: " << state->_calib_dt_CAMtoIMU->value()(0) << std::endl;
+    }
+  }
+  return 0;
+}
