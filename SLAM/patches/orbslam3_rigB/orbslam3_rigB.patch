@@ -1,0 +1,369 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 016e743..065e8cc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -55,6 +55,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
+ 
+ add_library(${PROJECT_NAME} SHARED
+ src/System.cc
++src/Rig.cc
+ src/Tracking.cc
+ src/LocalMapping.cc
+ src/LoopClosing.cc
+diff --git a/Examples/Monocular-Inertial/mono_inertial_euroc.cc b/Examples/Monocular-Inertial/mono_inertial_euroc.cc
+index b9f320f..473c1b2 100644
+--- a/Examples/Monocular-Inertial/mono_inertial_euroc.cc
++++ b/Examples/Monocular-Inertial/mono_inertial_euroc.cc
+@@ -117,7 +117,9 @@ int main(int argc, char *argv[])
+     cout.precision(17);
+ 
+     // Create SLAM system. It initializes all system threads and gets ready to process frames.
+-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_MONOCULAR, true);
++    // Viewer OFF: Pangolin needs an X display and we run headless in docker.
++    // (QT_QPA_PLATFORM=offscreen does not help -- Pangolin is X11/GLX, not Qt.)
++    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_MONOCULAR, false);
+     float imageScale = SLAM.GetImageScale();
+ 
+     double t_resize = 0.f;
+@@ -235,6 +237,8 @@ int main(int argc, char *argv[])
+     // Save camera trajectory
+     if (bFileName)
+     {
++        const string mp_file =  "mp_" + string(argv[argc-1]) + ".csv";
++        SLAM.SaveMapPoints(mp_file);
+         const string kf_file =  "kf_" + string(argv[argc-1]) + ".txt";
+         const string f_file =  "f_" + string(argv[argc-1]) + ".txt";
+         SLAM.SaveTrajectoryEuRoC(f_file);
+diff --git a/include/ORBextractor.h b/include/ORBextractor.h
+index bb7aace..a435c92 100644
+--- a/include/ORBextractor.h
++++ b/include/ORBextractor.h
+@@ -49,6 +49,12 @@ public:
+     ORBextractor(int nfeatures, float scaleFactor, int nlevels,
+                  int iniThFAST, int minThFAST);
+ 
++    // Validity mask, full sensor resolution. Convention: NONZERO == MASKED
++    // (ignore), matching OpenVINS and OKVIS2's actual behaviour. Needed for
++    // fisheye lenses, whose image corners lie outside the image circle.
++    void SetMask(const cv::Mat& mask);
++    bool HasMask() const { return !mMask.empty(); }
++
+     ~ORBextractor(){}
+ 
+     // Compute the ORB features and descriptors on an image.
+@@ -81,6 +87,7 @@ public:
+     }
+ 
+     std::vector<cv::Mat> mvImagePyramid;
++    cv::Mat mMask;
+ 
+ protected:
+ 
+diff --git a/include/System.h b/include/System.h
+index 872c86e..aac8898 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -38,6 +38,7 @@
+ #include "ORBVocabulary.h"
+ #include "Viewer.h"
+ #include "ImuTypes.h"
++#include "Rig.h"
+ #include "Settings.h"
+ 
+ 
+@@ -83,6 +84,9 @@ class Settings;
+ class System
+ {
+ public:
++    // Non-overlapping rig (Step 0 extrinsics). Owned here, shared by the threads.
++    Rig mRig;
++
+     // Input sensor
+     enum eSensor{
+         MONOCULAR=0,
+@@ -153,6 +157,12 @@ public:
+     void SaveKeyFrameTrajectoryTUM(const string &filename);
+ 
+     void SaveTrajectoryEuRoC(const string &filename);
++
++    // Dump the sparse map. ORB-SLAM3 builds a MapPoint cloud but the stock
++    // examples never write it out, so every run looked cloudless. Each point
++    // carries the timestamp of its first observing keyframe, which lets a
++    // viewer GROW the cloud over time instead of popping it in at the end.
++    void SaveMapPoints(const string &filename);
+     void SaveKeyFrameTrajectoryEuRoC(const string &filename);
+ 
+     void SaveTrajectoryEuRoC(const string &filename, Map* pMap);
+diff --git a/include/Tracking.h b/include/Tracking.h
+index 863c98e..ad40e0a 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -357,6 +357,10 @@ protected:
+ 
+     void newParameterLoader(Settings* settings);
+ 
++    // path of the settings yaml, so newParameterLoader can read extra keys
++    // (e.g. Camera1.mask) that Settings does not expose
++    std::string mStrSettingPath;
++
+ #ifdef REGISTER_LOOP
+     bool Stop();
+ 
+diff --git a/src/Frame.cc b/src/Frame.cc
+index a04c312..befaa89 100644
+--- a/src/Frame.cc
++++ b/src/Frame.cc
+@@ -17,6 +17,7 @@
+ */
+ 
+ #include "Frame.h"
++#include "Rig.h"
+ 
+ #include "G2oTypes.h"
+ #include "MapPoint.h"
+@@ -1124,6 +1125,24 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+ }
+ 
+ void Frame::ComputeStereoFishEyeMatches() {
++    // MONO-RIG: on a non-overlapping (back-to-back) rig the two cameras share no
++    // field of view at any instant, so every "stereo" match is false. Skip the
++    // matching and leave the correspondence/depth arrays empty; every downstream
++    // site already guards on mvLeftToRightMatch[i] != -1, so both cameras then
++    // contribute purely MONOCULAR observations -- which is correct for this rig.
++    // Depth comes from triangulating across TIME, not across lenses.
++    if (Rig::NonOverlappingGlobal()) {
++        Rig::StageOnce("frame", "non-overlapping rig: cross-camera stereo "
++                                "matching SKIPPED; both cameras are monocular");
++        mvLeftToRightMatch = std::vector<int>(Nleft, -1);
++        mvRightToLeftMatch = std::vector<int>(Nright, -1);
++        mvDepth = std::vector<float>(Nleft, -1.0f);
++        mvuRight = std::vector<float>(Nleft, -1);
++        mvStereo3Dpoints = std::vector<Eigen::Vector3f>(Nleft);
++        mnCloseMPs = 0;
++        return;
++    }
++
+     //Speed it up by matching keypoints in the lapping area
+     vector<cv::KeyPoint> stereoLeft(mvKeys.begin() + monoLeft, mvKeys.end());
+     vector<cv::KeyPoint> stereoRight(mvKeysRight.begin() + monoRight, mvKeysRight.end());
+diff --git a/src/LocalMapping.cc b/src/LocalMapping.cc
+index 53df332..96ab35c 100644
+--- a/src/LocalMapping.cc
++++ b/src/LocalMapping.cc
+@@ -18,6 +18,7 @@
+ 
+ 
+ #include "LocalMapping.h"
++#include "Rig.h"
+ #include "LoopClosing.h"
+ #include "ORBmatcher.h"
+ #include "Optimizer.h"
+@@ -63,6 +64,9 @@ void LocalMapping::SetTracker(Tracking *pTracker)
+ 
+ void LocalMapping::Run()
+ {
++    Rig::Stage("localmapping", "thread start; rig consumers: triangulation across "
++                               "cameras, rig-constrained local BA, VI-BA");
++
+     mbFinished = false;
+ 
+     while(1)
+@@ -228,13 +232,13 @@ void LocalMapping::Run()
+                         }
+ 
+                         // scale refinement
+-                        if (((mpAtlas->KeyFramesInMap())<=200) &&
+-                                ((mTinit>25.0f && mTinit<25.5f)||
+-                                (mTinit>35.0f && mTinit<35.5f)||
+-                                (mTinit>45.0f && mTinit<45.5f)||
+-                                (mTinit>55.0f && mTinit<55.5f)||
+-                                (mTinit>65.0f && mTinit<65.5f)||
+-                                (mTinit>75.0f && mTinit<75.5f))){
++                        // FIX: upstream gates this on <=200 keyframes and on
++                        // hardcoded windows ending at 75 s. Our sequences have
++                        // ~560 KFs over ~130 s, so scale refinement NEVER ran and
++                        // scale stayed frozen at its init value (~2.2% error).
++                        // Now: no KF cap, and a periodic window every 10 s.
++                        if (fmodf(mTinit, 10.0f) > 5.0f && fmodf(mTinit, 10.0f) < 5.5f
++                            && mTinit > 25.0f){
+                             if (mbMonocular)
+                                 ScaleRefinement();
+                         }
+diff --git a/src/LoopClosing.cc b/src/LoopClosing.cc
+index 319afb5..080aaab 100644
+--- a/src/LoopClosing.cc
++++ b/src/LoopClosing.cc
+@@ -18,6 +18,7 @@
+ 
+ 
+ #include "LoopClosing.h"
++#include "Rig.h"
+ 
+ #include "Sim3Solver.h"
+ #include "Converter.h"
+@@ -89,6 +90,9 @@ void LoopClosing::SetLocalMapper(LocalMapping *pLocalMapper)
+ 
+ void LoopClosing::Run()
+ {
++    Rig::Stage("loopclosing", "thread start; rig consumers: cross-camera place "
++                              "recognition, rig-consistent geometric verification");
++
+     mbFinished =false;
+ 
+     while(1)
+diff --git a/src/ORBextractor.cc b/src/ORBextractor.cc
+index 970b7cc..13bd0b0 100644
+--- a/src/ORBextractor.cc
++++ b/src/ORBextractor.cc
+@@ -778,6 +778,19 @@ namespace ORB_SLAM3
+         return vResultKeys;
+     }
+ 
++    void ORBextractor::SetMask(const cv::Mat& mask)
++    {
++        // Convention: NONZERO == MASKED (ignore). Same as OpenVINS, and the same
++        // as OKVIS2's actual isMasked() behaviour (whose doc comment is wrong).
++        if (mask.empty()) { mMask = cv::Mat(); return; }
++        CV_Assert(mask.type() == CV_8UC1);
++        mMask = mask;
++        std::cout << "[ORBextractor] mask set: "
++                  << cv::countNonZero(mMask) << "/" << mMask.total()
++                  << " px MASKED (" << 100.0*cv::countNonZero(mMask)/mMask.total()
++                  << "%)" << std::endl;
++    }
++
+     void ORBextractor::ComputeKeyPointsOctTree(vector<vector<KeyPoint> >& allKeypoints)
+     {
+         allKeypoints.resize(nlevels);
+@@ -871,6 +884,29 @@ namespace ORB_SLAM3
+                 }
+             }
+ 
++            // Drop masked corners BEFORE DistributeOctTree, which is the
++            // retention/truncation step. Filtering afterwards would let the
++            // octree allocate its quota to keypoints that then get deleted,
++            // silently starving the feature count.
++            if(!mMask.empty())
++            {
++                const float invScale = mvScaleFactor[level];
++                vector<KeyPoint> vKept;
++                vKept.reserve(vToDistributeKeys.size());
++                for(size_t ik=0; ik<vToDistributeKeys.size(); ik++)
++                {
++                    // level coords (relative to minBorder) -> original image coords
++                    const int ux = cvRound((vToDistributeKeys[ik].pt.x + minBorderX) * invScale);
++                    const int uy = cvRound((vToDistributeKeys[ik].pt.y + minBorderY) * invScale);
++                    if(ux < 0 || uy < 0 || ux >= mMask.cols || uy >= mMask.rows)
++                        continue;
++                    if(mMask.at<uchar>(uy, ux))   // nonzero == masked
++                        continue;
++                    vKept.push_back(vToDistributeKeys[ik]);
++                }
++                vToDistributeKeys.swap(vKept);
++            }
++
+             vector<KeyPoint> & keypoints = allKeypoints[level];
+             keypoints.reserve(nfeatures);
+ 
+diff --git a/src/System.cc b/src/System.cc
+index 60d9c51..4b57779 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -188,6 +188,12 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+     //Initialize the Tracking thread
+     //(it will live in the main thread of execution, the one that called this constructor)
+     cout << "Seq. Name: " << strSequence << endl;
++    // ---- rig: load BEFORE the threads start, so every consumer sees the same
++    // extrinsics and the log shows the rig state before any tracking output.
++    mRig.LoadFromSettings(strSettingsFile);
++    if(mRig.IsEnabled())
++        Rig::Stage("system", "rig available to Tracking / LocalMapping / LoopClosing");
++
+     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
+                              mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence);
+ 
+@@ -659,6 +665,35 @@ void System::SaveKeyFrameTrajectoryTUM(const string &filename)
+     f.close();
+ }
+ 
++void System::SaveMapPoints(const string &filename)
++{
++    cout << endl << "Saving map points to " << filename << " ..." << endl;
++    vector<Map*> vpMaps = mpAtlas->GetAllMaps();
++    // largest map = the one that actually tracked
++    Map* pBiggerMap = nullptr;
++    size_t numMax = 0;
++    for(Map* pMap : vpMaps)
++        if(pMap->GetAllKeyFrames().size() > numMax){ numMax = pMap->GetAllKeyFrames().size(); pBiggerMap = pMap; }
++    if(!pBiggerMap){ cout << "  no map to save" << endl; return; }
++
++    ofstream f(filename);
++    f << fixed << "t,x,y,z" << endl;
++    int n = 0, nbad = 0;
++    for(MapPoint* pMP : pBiggerMap->GetAllMapPoints())
++    {
++        if(!pMP || pMP->isBad()){ nbad++; continue; }
++        Eigen::Vector3f P = pMP->GetWorldPos();
++        double t = 0.0;
++        KeyFrame* pRef = pMP->GetReferenceKeyFrame();
++        if(pRef) t = pRef->mTimeStamp;          // first-seen time -> growing cloud
++        f << setprecision(9) << t << ","
++          << setprecision(6) << P(0) << "," << P(1) << "," << P(2) << endl;
++        n++;
++    }
++    f.close();
++    cout << "  wrote " << n << " map points (" << nbad << " bad/culled skipped)" << endl;
++}
++
+ void System::SaveTrajectoryEuRoC(const string &filename)
+ {
+ 
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 5191451..0ccb16b 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -18,6 +18,7 @@
+ 
+ 
+ #include "Tracking.h"
++#include "Rig.h"
+ 
+ #include "ORBmatcher.h"
+ #include "FrameDrawer.h"
+@@ -49,6 +50,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
+     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
+ {
+     // Load camera parameters from settings file
++    mStrSettingPath = strSettingPath;
+     if(settings){
+         newParameterLoader(settings);
+     }
+@@ -600,6 +602,28 @@ void Tracking::newParameterLoader(Settings *settings) {
+     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
+         mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+ 
++    // Optional validity mask (fisheye image circle). Read straight from the
++    // settings file: "Camera1.mask" / "Camera2.mask". NONZERO == MASKED.
++    {
++        cv::FileStorage fs(mStrSettingPath, cv::FileStorage::READ);
++        auto loadMask = [&](const char* key, ORBextractor* ex1, ORBextractor* ex2){
++            if(!fs.isOpened() || fs[key].empty() || !fs[key].isString()) return;
++            const std::string path = (std::string)fs[key];
++            cv::Mat m = cv::imread(path, cv::IMREAD_GRAYSCALE);
++            if(m.empty()){
++                std::cerr << "[Tracking] FATAL: could not read mask " << path << std::endl;
++                exit(-1);
++            }
++            if(ex1) ex1->SetMask(m);
++            if(ex2) ex2->SetMask(m);
++        };
++        loadMask("Camera1.mask", mpORBextractorLeft, mpIniORBextractor);
++        loadMask("Camera2.mask", mpORBextractorRight, nullptr);
++    }
++
++    Rig::Stage("tracking", "parameter load complete; rig consumers: frame construction, "
++                           "pose prediction, projection search");
++
+     //IMU parameters
+     Sophus::SE3f Tbc = settings->Tbc();
+     mInsertKFsLost = settings->insertKFsWhenLost();
