@@ -1,0 +1,35 @@
+%YAML:1.0
+# Insta360 One RS dual fisheye, factory Mei calibration mapped onto the
+# 2944x2880 video frames AFTER the 180-deg rotation applied by extract_insv.py
+# (cx,cy point-reflected, tangential p1,p2 negated). xi is fixed (not estimated).
+# T_imu_cam are rough initial guesses (IMU frame ~ rotated cam0 frame,
+# back lens = Ry(180) + ~4cm); online extrinsic calibration refines them.
+
+cam0:
+  T_imu_cam: # rotation from camera to IMU R_CtoI, position of camera in IMU p_CinI
+    - [1.0, 0.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+  cam_overlaps: []
+  camera_model: omni
+  distortion_coeffs: [0.22369747, -0.22588399, -0.00104794, -0.00129457]
+  distortion_model: mei
+  xi: 2.01493
+  intrinsics: [2989.56, 2989.35, 1471.94, 1446.21] #fu, fv, cu, cv
+  resolution: [2944, 2880]
+  rostopic: /cam0/image_raw
+cam1:
+  T_imu_cam:
+    - [-1.0, 0.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, -1.0, -0.04]
+    - [0.0, 0.0, 0.0, 1.0]
+  cam_overlaps: []
+  camera_model: omni
+  distortion_coeffs: [0.22918753, -0.29607275, -0.00155809, 0.00027378]
+  distortion_model: mei
+  xi: 2.01493
+  intrinsics: [2979.79, 2979.61, 1472.67, 1452.70]
+  resolution: [2944, 2880]
+  rostopic: /cam1/image_raw
