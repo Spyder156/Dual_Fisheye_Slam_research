@@ -356,6 +356,12 @@ def main():
     fids = np.atleast_1d(frames["frame"]).astype(int)
     fts = np.atleast_1d(frames["t"])
 
+    # ---- colour the map ------------------------------------------------------
+    # Pick the colours first, then log ONCE through the shared growth path
+    # below. Keeping these separate is deliberate: the previous version computed
+    # rig colours in a branch that never reached a rr.log() call, so every rig
+    # run printed correct red/blue/green counts and shipped an empty cloud.
+    cols = None
     if len(pts) and pt_cam_kept is not None:
         # RIG CHECK: colour by the camera that saw the landmark, not by scene
         # appearance. If the rig geometry is right, BLUE (front) sits ahead of
@@ -367,28 +373,33 @@ def main():
         n0 = int((pt_cam_kept == 0).sum()); n1 = int((pt_cam_kept == 1).sum())
         nb = int((pt_cam_kept == 2).sum())
         print(f"cloud by camera: front(blue) {n0}, rear(red) {n1}, both(GREEN) {nb}")
-        n_col = len(pts)
     elif len(pts) and cams:
         cols, n_col = scene_colors(pts, P, Rw, T, cams, args.dataset, fids, fts)
         print(f"scene-coloured {n_col}/{len(pts)} landmarks "
               f"({100*n_col/len(pts):.1f}%); rest left neutral grey")
+    elif len(pts):
+        cols = np.tile(np.array([[150, 150, 160]], np.uint8), (len(pts), 1))
+
+    if cols is not None:
         if pt_t_kept is not None and len(pt_t_kept) == len(pts):
-            # grow the cloud: at each bucket, log every point seen SO FAR
-            tb = np.linspace(T[0], T[-1], 120)
+            # GROW the map: at each time bucket log every landmark created so
+            # far, so scrubbing the timeline shows the map being built rather
+            # than the finished cloud sitting there from t=0.
+            tb = np.linspace(T[0], T[-1], 240)
             order = np.argsort(pt_t_kept)
+            ts_sorted = pt_t_kept[order]
             for tt in tb:
-                k = int(np.searchsorted(pt_t_kept[order], tt))
+                k = int(np.searchsorted(ts_sorted, tt))
                 if k < 8:
                     continue
                 set_t(float(tt))
                 sel = order[:k]
                 rr.log("world/points",
                        rr.Points3D(pts[sel], colors=cols[sel], radii=S * 0.00025))
+            print(f"map grows over {len(tb)} steps -> {len(pts)} landmarks")
         else:
+            print("no per-landmark timestamps; logging the map statically")
             rr.log("world/points", rr.Points3D(pts, colors=cols, radii=S * 0.00025))
-    elif len(pts):
-        rr.log("world/points", rr.Points3D(pts, colors=[[150, 150, 160]],
-                                           radii=S * 0.00025))
 
     # real camera frusta at the live pose — sized like a real camera (~15 cm at
     # room scale), not a landmark of the map

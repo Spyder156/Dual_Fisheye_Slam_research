@@ -83,6 +83,32 @@ landmarks shrink the whole trajectory to a dot. Every run must therefore:
 - **1 m `LineGrid3D`** on the ground plane, so distances are readable by eye.
 - Log `rr.ViewCoordinates.RIGHT_HAND_Z_UP` on `/world`.
 
+
+### Rig runs — colour is by CAMERA, not by appearance
+On a two-camera rig the colours answer "which lens saw this", because that is
+the direct test of whether the rig geometry is right.
+
+- **3D cloud**: front-only **blue**, rear-only **red**, seen by **both lenses
+  GREEN**. With correct extrinsics blue should sit AHEAD of the moving camera
+  and red BEHIND it; green marks genuine cross-lens matches (a place the front
+  saw earlier and the rear sees later).
+- **Two video panes**, front and rear, side by side. Never one pane on a rig
+  run -- otherwise a per-camera tracking loss is invisible.
+- **Keypoints are coloured by the lens the OBSERVATION came from**: front blue,
+  rear red. Never by which lens first saw the landmark. A point on the rear
+  pane is red even if its landmark originated up front.
+- Bright = tracked, dim = untracked, so a tracking collapse reads as the bright
+  points vanishing on one camera.
+- **Plot: tracked keypoints per camera** over time. This is what shows a
+  front-camera blackout being carried by the rear one.
+- **The cloud GROWS.** Landmarks appear at the timestamp of their first
+  observing keyframe, so scrubbing shows the map being built. Never dump the
+  finished cloud at t=0 -- that hides exactly where the map goes wrong.
+- **Two LINE panes** below the video panes when a run used the line detector,
+  same scheme: front **blue**, rear **red**, self-occlusion masked segments
+  dropped as the estimator drops them. The reprojection-error plot was removed
+  to make room; it never told us anything the keypoint counts did not.
+
 ### Hard rules
 - Full frame rate. No decimation unless stated.
 - **Never `static=True`** — it hangs Rerun viewer 0.33 on images. Everything on the timeline.
