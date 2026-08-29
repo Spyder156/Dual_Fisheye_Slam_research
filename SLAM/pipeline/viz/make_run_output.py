@@ -34,6 +34,46 @@ def _nums(s):
     return [float(x) for x in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)]
 
 
+def load_cameras_orb(yml):
+    """Cameras from the ORB-SLAM3 settings file the run actually used.
+
+    Reading the estimator's OWN config is the only way to guarantee the frusta
+    and the display rotation match what SLAM saw. Pointing this at some other
+    calibration directory is how the frames silently came out upside down and
+    the camera cones vanished: load_cameras() returned [], and every consumer
+    treated "no cameras" as "nothing to draw" rather than as an error.
+    """
+    txt = Path(yml).read_text()
+
+    def g(k, d=0.0):
+        m = re.search(rf"^{re.escape(k)}:\s*([-\d.eE+]+)", txt, re.M)
+        return float(m.group(1)) if m else d
+
+    def mat(key):
+        m = re.search(rf"{re.escape(key)}:.*?data:\s*\[(.*?)\]", txt, re.S)
+        return np.array(_nums(m.group(1))).reshape(4, 4) if m else None
+
+    w, h = int(g("Camera.width")), int(g("Camera.height"))
+    T_b_c1 = mat("IMU.T_b_c1")
+    if T_b_c1 is None:
+        return []
+    cams = [dict(T=T_b_c1, fx=g("Camera1.fx"), fy=g("Camera1.fy"),
+                 cx=g("Camera1.cx"), cy=g("Camera1.cy"), w=w, h=h,
+                 d=[g("Camera1.k1"), g("Camera1.k2"), g("Camera1.k3"), g("Camera1.k4")],
+                 mask=None)]
+    if g("Camera2.fx"):
+        # rear lens: T_b_c2 = T_b_c1 * T_c1_c2, the rig transform
+        T_c1_c2 = mat("Rig.T_c0_c1")
+        if T_c1_c2 is None:
+            T_c1_c2 = mat("Stereo.T_c1_c2")
+        if T_c1_c2 is not None:
+            cams.append(dict(T=T_b_c1 @ T_c1_c2, fx=g("Camera2.fx"), fy=g("Camera2.fy"),
+                             cx=g("Camera2.cx"), cy=g("Camera2.cy"), w=w, h=h,
+                             d=[g("Camera2.k1"), g("Camera2.k2"),
+                                g("Camera2.k3"), g("Camera2.k4")], mask=None))
+    return cams
+
+
 def load_cameras(cfg):
     """Read camera intrinsics + T_CtoI (camera->IMU) from either config style.
 
@@ -41,6 +81,9 @@ def load_cameras(cfg):
     (T_SC as a flat 16-list). Both are OpenCV-flavoured YAML, so parse the
     numbers directly rather than fighting the %YAML:1.0 directive.
     """
+    cfg = Path(cfg)
+    if cfg.is_file():
+        return load_cameras_orb(cfg)
     cams = []
     kal = cfg / "kalibr_imucam_chain.yaml"
     ok = cfg / "hilti.yaml"
@@ -290,6 +333,30 @@ def main():
         if pt_cam_kept is not None:
             pt_cam_kept = pt_cam_kept[_sub]
 
+    # ---------------- put the ESTIMATE into the GT frame ---------------------
+    # Align the ESTIMATE onto GT, not GT onto the estimate. Both conventions
+    # give the same error number, but only this one leaves GT sitting in its
+    # true frame -- so when the run drifts you SEE it peel away from the real
+    # path. The map has to ride the same transform as the trajectory that
+    # created it; transforming one without the other is what made the cloud
+    # look "aligned to the old trajectory".
+    align = None
+    if args.gt and args.gt.exists():
+        _g = np.loadtxt(args.gt)
+        _tg, _Pg = _g[:, 0], _g[:, 1:4]
+        _m = (_tg >= T[0]) & (_tg <= T[-1])
+        if _m.sum() > 10:
+            _A = np.stack([np.interp(_tg[_m], T, P[:, i]) for i in range(3)], 1)
+            align = umeyama(_A, _Pg[_m])          # SLAM -> GT
+            R_al, t_al = align
+            P = (R_al @ P.T).T + t_al
+            Q = Rotation.from_matrix(R_al @ Rotation.from_quat(Q).as_matrix()).as_quat()
+            if len(pts):
+                pts = (R_al @ pts.T).T + t_al
+            if len(pts_all_t):
+                pts_all_t = (R_al @ pts_all_t.T).T + t_al
+            print("estimate aligned into the GT frame (map rides the same transform)")
+
     # every visual size derives from scene scale, so the view reads the same
     # whether the run is a 3 m desk loop or a 300 m building
     S = float(np.linalg.norm(P.max(0) - P.min(0)))
@@ -298,7 +365,11 @@ def main():
     np.savetxt(out / "traj.csv", np.column_stack([T, P, Q]), delimiter=",",
                header="t,px,py,pz,qx,qy,qz,qw", comments="")
     if args.config and args.config.exists():
-        shutil.copytree(args.config, out / "config", dirs_exist_ok=True)
+        if args.config.is_file():
+            (out / "config").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(args.config, out / "config" / args.config.name)
+        else:
+            shutil.copytree(args.config, out / "config", dirs_exist_ok=True)
 
     # ---------------- GT, aligned into the SLAM frame ------------------------
     Pg = tg = None
@@ -308,8 +379,8 @@ def main():
         m = (tg_all >= T[0]) & (tg_all <= T[-1])
         if m.sum() > 10:
             A = np.stack([np.interp(tg_all[m], T, P[:, i]) for i in range(3)], 1)
-            R, t = umeyama(Pg_all[m], A)     # GT -> SLAM frame
-            Pg, tg = (R @ Pg_all[m].T).T + t, tg_all[m]
+            # P is already in the GT frame, so GT is drawn untouched
+            Pg, tg = Pg_all[m], tg_all[m]
             err = np.linalg.norm(A - Pg, axis=1)
             score = float((100 * np.exp(-0.46051701859880917 * err)).mean())
             (out / "score.txt").write_text(
@@ -411,7 +482,9 @@ def main():
             image_plane_distance=S * 0.005))
 
     # trajectory grows over time
-    w_line = S * 0.0025
+    # ~1/3 of the old width. Positive radii are WORLD units, so the line
+    # thickens and thins with zoom instead of staying a fixed screen smear.
+    w_line = S * 0.0008
     for i in range(1, len(P)):
         set_t(float(T[i]))
         rr.log("world/traj", rr.LineStrips3D([P[:i + 1]], colors=[[42, 120, 214]],
@@ -522,7 +595,7 @@ def main():
                     strips.append([p1, p2]); cols.append(col)
                 if strips:
                     rr.log(f"lines{c}/image/segments",
-                           rr.LineStrips2D(strips, colors=cols, radii=1.4))
+                           rr.LineStrips2D(strips, colors=cols, radii=2.2))
                     rr.log(f"plots/kp_count/lines{c}", rr.Scalars(float(len(strips))))
 
         if kts is None or not len(kts):
@@ -549,7 +622,7 @@ def main():
                     xy.append([W - 1 - u, H - 1 - v] if rot180 else [u, v])
                     co.append(base if tr else [int(x * 0.35) for x in base])
                 rr.log(f"cam{c}/image/keypoints",
-                       rr.Points2D(np.array(xy), colors=co, radii=2.2))
+                       rr.Points2D(np.array(xy), colors=co, radii=4.4))
                 rr.log(f"plots/kp_count/cam{c}",
                        rr.Scalars(float(sum(1 for r in sel if r[4]))))
             continue
@@ -573,9 +646,9 @@ def main():
             return np.column_stack([W - 1 - a[:, 0], H - 1 - a[:, 1]]) if rot180 else a
 
         if tail_xy:
-            rr.log("cam0/image/tracks", rr.Points2D(disp(tail_xy), colors=tail_col, radii=1.2))
+            rr.log("cam0/image/tracks", rr.Points2D(disp(tail_xy), colors=tail_col, radii=2.4))
         if len(pos_now):
-            rr.log("cam0/image/keypoints", rr.Points2D(disp(pos_now), colors=[[40, 220, 90]], radii=2.4))
+            rr.log("cam0/image/keypoints", rr.Points2D(disp(pos_now), colors=[[40, 220, 90]], radii=4.8))
         for fid in list(hist):
             if fid not in alive:
                 del hist[fid]
