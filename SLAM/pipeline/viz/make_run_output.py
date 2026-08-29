@@ -312,6 +312,46 @@ def main():
     # points.csv keeps the FULL map; clipping below is for display only
     np.savetxt(out / "points.csv", pts, delimiter=",", header="x,y,z", comments="")
 
+    # ---- put the map in the TRAJECTORY's frame ------------------------------
+    # SaveTrajectoryEuRoC re-expresses the trajectory relative to the first
+    # keyframe ("b0 is the new world reference"); older SaveMapPoints dumps
+    # wrote raw world coordinates. The two files then disagree by a constant
+    # T_w_b0 -- a metre of translation and a large rotation -- so the map looked
+    # fine on its own while the camera never passed through it.
+    #
+    # The keyframe dump is in the RAW world frame, so comparing it against the
+    # frame trajectory at shared timestamps recovers T_w_b0 exactly. Applied
+    # only when it actually tightens the map, so runs from the fixed C++ (which
+    # already writes b0) are left alone rather than transformed twice.
+    if args.engine == "tum" and pt_t is not None and len(pts):
+        kfp = Path(str(args.traj).replace("f_", "kf_"))
+        if kfp.exists():
+            _kf = np.loadtxt(kfp)
+            _kf[:, 0] /= (1e9 if _kf[0, 0] > 1e12 else 1.0)
+
+            def _se3(r):
+                M = np.eye(4)
+                M[:3, :3] = Rotation.from_quat(r[4:8]).as_matrix()
+                M[:3, 3] = r[1:4]
+                return M
+
+            _j = np.argmin(np.abs(T - _kf[len(_kf) // 2, 0]))
+            if abs(T[_j] - _kf[len(_kf) // 2, 0]) < 1e-4:
+                Twb0 = _se3(_kf[len(_kf) // 2]) @ np.linalg.inv(
+                    _se3(np.r_[T[_j], P[_j], Q[_j]]))
+                _inv = np.linalg.inv(Twb0)
+                _cand = (_inv[:3, :3] @ pts.T).T + _inv[:3, 3]
+                _A = np.stack([np.interp(pt_t, T, P[:, i]) for i in range(3)], 1)
+                _d0 = np.median(np.linalg.norm(pts - _A, axis=1))
+                _d1 = np.median(np.linalg.norm(_cand - _A, axis=1))
+                if _d1 < 0.9 * _d0:
+                    pts = _cand
+                    print(f"map moved into the trajectory frame (T_w_b0 undone): "
+                          f"median landmark depth {_d0:.2f} m -> {_d1:.2f} m")
+                else:
+                    print(f"map already in the trajectory frame "
+                          f"(median landmark depth {_d0:.2f} m)")
+
     pts_all_t = pts
     pt_t_kept = pt_cam_kept = None
     if pt_t is not None:
