@@ -249,6 +249,9 @@ def main():
                     help="line_extract binary; enables the two LINE panes")
     ap.add_argument("--line-masks", default=None,
                     help="dir with selfocc_cam{0,1}.png, applied as in the SLAM")
+    ap.add_argument("--max-depth", type=float, default=30.0,
+                    help="drop landmarks further than this from the camera that "
+                         "created them (display only)")
     ap.add_argument("--clip-margin", type=float, default=1.5,
                     help="keep landmarks within margin*traj_diagonal of the path")
     args = ap.parse_args()
@@ -310,19 +313,34 @@ def main():
     np.savetxt(out / "points.csv", pts, delimiter=",", header="x,y,z", comments="")
 
     pts_all_t = pts
+    pt_t_kept = pt_cam_kept = None
     if pt_t is not None:
-        from scipy.spatial import cKDTree as _KD
-        _diag = float(np.linalg.norm(P.max(0) - P.min(0)))
-        _r = max(8.0, args.clip_margin * _diag)
-        _d, _ = _KD(P).query(pts, k=1)
-        _keep = _d <= _r
-        pt_t_kept = pt_t[_keep]
-        pt_cam_kept = pt_cam[_keep] if pt_cam is not None else None
+        # CULL BY DEPTH FROM THE CAMERA THAT CREATED THE LANDMARK.
+        #
+        # The old test -- distance to the nearest point of the path -- scales
+        # its radius with the trajectory's own diagonal. When a run drifts, the
+        # trajectory grows, the radius grows with it, and the filter opens up
+        # exactly when the map is at its worst. On run_2 that left a 310 m
+        # radius and passed 99.6% of a map whose landmarks reach 300 m out.
+        #
+        # Depth from the CREATING camera does not have that feedback: indoors, a
+        # landmark hundreds of metres from the camera that first saw it is a
+        # failed triangulation, however far the estimate has wandered. This is a
+        # DISPLAY cull only -- points.csv above keeps the full map.
+        A = np.stack([np.interp(pt_t, T, P[:, i]) for i in range(3)], 1)
+        depth = np.linalg.norm(pts - A, axis=1)
+        keep = depth <= args.max_depth
+        n_far = int((~keep).sum())
+        pts, pt_t_kept = pts[keep], pt_t[keep]
+        if pt_cam is not None:
+            pt_cam_kept = pt_cam[keep]
+        if n_far:
+            print(f"culled {n_far} landmarks beyond {args.max_depth:.0f} m of the "
+                  f"camera that created them ({100*n_far/len(keep):.1f}% of the map; "
+                  f"median depth of the rest {np.median(depth[keep]):.1f} m)")
     else:
-        pt_t_kept = None
-        pt_cam_kept = None
-    pts, n_far = clip_cloud(pts, P, margin=args.clip_margin)
-    if n_far:
+        pts, n_far = clip_cloud(pts, P, margin=args.clip_margin)
+    if n_far and pt_t is None:
         print(f"clipped {n_far} landmarks far from the trajectory "
               f"({100*n_far/(n_far+len(pts)):.1f}% of the map)")
     if len(pts) > MAX_POINTS:
