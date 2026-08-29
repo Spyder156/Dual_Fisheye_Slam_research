@@ -202,6 +202,10 @@ def main():
     ap.add_argument("--gt", type=Path, default=None)
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--stride", type=int, default=1, help="video frame stride (1 = full fps)")
+    ap.add_argument("--elsed", default=None,
+                    help="line_extract binary; enables the two LINE panes")
+    ap.add_argument("--line-masks", default=None,
+                    help="dir with selfocc_cam{0,1}.png, applied as in the SLAM")
     ap.add_argument("--clip-margin", type=float, default=1.5,
                     help="keep landmarks within margin*traj_diagonal of the path")
     args = ap.parse_args()
@@ -234,10 +238,22 @@ def main():
         # the first observing keyframe, so the cloud can GROW over time.
         mf = Path(str(args.traj).replace("f_", "mp_").replace(".txt", ".csv"))
         if mf.exists():
-            m = load_csv_loose(mf, 4)
-            pt_t, pts = m[:, 0], m[:, 1:4]
+            m = load_csv_loose(mf, 5)
+            if m.shape[1] >= 5:
+                pt_t, pts, pt_cam = m[:, 0], m[:, 1:4], m[:, 4].astype(int)
+            else:
+                m = load_csv_loose(mf, 4)
+                pt_t, pts, pt_cam = m[:, 0], m[:, 1:4], None
         else:
-            pt_t, pts = None, np.zeros((0, 3))
+            pt_t, pts, pt_cam = None, np.zeros((0, 3)), None
+        # per-frame keypoints, columns t,cam,id,u,v,tracked
+        kf2 = Path(str(args.traj).replace("f_", "kp_").replace(".txt", ".csv"))
+        if kf2.exists():
+            raw = load_csv_loose(kf2, 6)
+            kps = defaultdict(list)
+            for r in raw:
+                kps[round(r[0], 6)].append((int(r[1]), int(r[2]), r[3], r[4], int(r[5])))
+            print(f"loaded {len(raw)} keypoint rows over {len(kps)} frames")
     else:
         traj = args.okvis_dir / "okvis2-slam-final_trajectory.csv"
         d = load_csv_loose(traj, 8)
@@ -246,6 +262,7 @@ def main():
         pts = load_csv_loose(mp, 4)[:, 1:4] if mp.exists() else np.zeros((0, 3))
 
     pt_t = pt_t if args.engine == "tum" else None
+    pt_cam = pt_cam if args.engine == "tum" else None
     # points.csv keeps the FULL map; clipping below is for display only
     np.savetxt(out / "points.csv", pts, delimiter=",", header="x,y,z", comments="")
 
@@ -257,8 +274,10 @@ def main():
         _d, _ = _KD(P).query(pts, k=1)
         _keep = _d <= _r
         pt_t_kept = pt_t[_keep]
+        pt_cam_kept = pt_cam[_keep] if pt_cam is not None else None
     else:
         pt_t_kept = None
+        pt_cam_kept = None
     pts, n_far = clip_cloud(pts, P, margin=args.clip_margin)
     if n_far:
         print(f"clipped {n_far} landmarks far from the trajectory "
@@ -268,6 +287,8 @@ def main():
         pts = pts[_sub]
         if pt_t_kept is not None:
             pt_t_kept = pt_t_kept[_sub]
+        if pt_cam_kept is not None:
+            pt_cam_kept = pt_cam_kept[_sub]
 
     # every visual size derives from scene scale, so the view reads the same
     # whether the run is a 3 m desk loop or a 300 m building
@@ -308,10 +329,18 @@ def main():
             line_grid=rrb.archetypes.LineGrid3D(
                 visible=True, spacing=1.0, stroke_width=1.0, color=[70, 70, 78, 140])),
         rrb.Vertical(
-            rrb.Spatial2DView(origin="/cam0", name="camera + tracks", contents="/cam0/**"),
-            rrb.TimeSeriesView(origin="/plots/reproj_px", name="reprojection error [px]"),
-            rrb.TimeSeriesView(origin="/plots/rot_err_deg", name="rotation error vs gyro [deg]"),
-            row_shares=[3, 1, 1]),
+            rrb.Horizontal(
+                rrb.Spatial2DView(origin="/cam0", name="FRONT points (blue)",
+                                  contents=["/cam0/image", "/cam0/image/keypoints"]),
+                rrb.Spatial2DView(origin="/cam1", name="REAR points (red)",
+                                  contents=["/cam1/image", "/cam1/image/keypoints"])),
+            rrb.Horizontal(
+                rrb.Spatial2DView(origin="/lines0", name="FRONT lines (blue)",
+                                  contents="/lines0/**"),
+                rrb.Spatial2DView(origin="/lines1", name="REAR lines (red)",
+                                  contents="/lines1/**")),
+            rrb.TimeSeriesView(origin="/plots/kp_count", name="tracked keypoints per camera"),
+            row_shares=[3, 3, 1]),
         column_shares=[3, 2]))
     rr.init("slam_run", spawn=False)
     rr.save(str(out / "run.rrd"))
@@ -327,7 +356,19 @@ def main():
     fids = np.atleast_1d(frames["frame"]).astype(int)
     fts = np.atleast_1d(frames["t"])
 
-    if len(pts) and cams:
+    if len(pts) and pt_cam_kept is not None:
+        # RIG CHECK: colour by the camera that saw the landmark, not by scene
+        # appearance. If the rig geometry is right, BLUE (front) sits ahead of
+        # the camera and RED (rear) behind it. That is directly visible.
+        cols = np.zeros((len(pts), 3), np.uint8)
+        cols[pt_cam_kept == 0] = [60, 130, 255]     # front  -> blue
+        cols[pt_cam_kept == 1] = [255, 70, 70]      # rear   -> red
+        cols[pt_cam_kept == 2] = [40, 210, 90]      # both   -> GREEN (cross-lens match)
+        n0 = int((pt_cam_kept == 0).sum()); n1 = int((pt_cam_kept == 1).sum())
+        nb = int((pt_cam_kept == 2).sum())
+        print(f"cloud by camera: front(blue) {n0}, rear(red) {n1}, both(GREEN) {nb}")
+        n_col = len(pts)
+    elif len(pts) and cams:
         cols, n_col = scene_colors(pts, P, Rw, T, cams, args.dataset, fids, fts)
         print(f"scene-coloured {n_col}/{len(pts)} landmarks "
               f"({100*n_col/len(pts):.1f}%); rest left neutral grey")
@@ -386,6 +427,34 @@ def main():
         up_C = cams[0]["T"][:3, :3].T @ (up_I / np.linalg.norm(up_I))
         rot180 = up_C[1] > 0.5            # world-up points DOWN in the image
         print(f"display rotation: {'180 deg (sensor frame is upside down)' if rot180 else 'none'}")
+    # ---- lines, same ELSED the estimator runs -------------------------------
+    lines = {0: {}, 1: {}}
+    lmask = {0: None, 1: None}
+    if args.elsed:
+        import subprocess
+        if args.line_masks:
+            for c in (0, 1):
+                mp = Path(args.line_masks) / f"selfocc_cam{c}.png"
+                if mp.exists():
+                    lmask[c] = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+        for c in (0, 1):
+            lst = out / f"_lines_cam{c}.list"
+            csvp = out / f"_lines_cam{c}.csv"
+            lst.write_text("\n".join(str(i) for i in fids) + "\n")
+            r = subprocess.run([args.elsed, str(args.dataset / f"cam{c}"),
+                                str(lst), str(csvp), "30", "15"],
+                               capture_output=True, text=True)
+            if r.returncode:
+                print(f"line_extract cam{c} failed: {r.stderr[-200:]}")
+                continue
+            with open(csvp) as f:
+                f.readline()
+                for l in f:
+                    p_ = l.split(",")
+                    lines[c].setdefault(int(p_[0]), []).append(
+                        [float(p_[1]), float(p_[2]), float(p_[3]), float(p_[4])])
+            print(f"lines cam{c}: {sum(len(v) for v in lines[c].values())} segments")
+
     hist = defaultdict(lambda: deque(maxlen=TRAIL))
     kts = np.array(sorted(kps.keys())) if kps else None
 
@@ -401,12 +470,78 @@ def main():
         if rot180:
             vis = cv2.rotate(vis, cv2.ROTATE_180)
         rr.log("cam0/image", rr.Image(vis).compress(jpeg_quality=70))
+        # REAR camera, same treatment. A rig run must show both or we cannot
+        # tell which camera lost tracking.
+        img1 = cv2.imread(str(args.dataset / "cam1" / f"{fids[k]:06d}.jpg"),
+                          cv2.IMREAD_GRAYSCALE)
+        if img1 is not None:
+            m1 = cams[1]["mask"] if len(cams) > 1 else None
+            v1 = shade_masked(img1, m1)
+            if rot180:
+                v1 = cv2.rotate(v1, cv2.ROTATE_180)
+            rr.log("cam1/image", rr.Image(v1).compress(jpeg_quality=70))
+        # LINE panes: same red/blue scheme as the points and the 3D cloud.
+        # Masked segments are dropped exactly as the estimator drops them, so
+        # what is drawn is what the SLAM actually had.
+        if args.elsed:
+            for c in (0, 1):
+                segs = lines[c].get(int(fids[k]), [])
+                if not segs:
+                    continue
+                img_c = img if c == 0 else img1
+                if img_c is None:
+                    continue
+                base = cv2.cvtColor(img_c, cv2.COLOR_GRAY2BGR)
+                if rot180:
+                    base = cv2.rotate(base, cv2.ROTATE_180)
+                rr.log(f"lines{c}/image", rr.Image(base).compress(jpeg_quality=70))
+                col = [60, 130, 255] if c == 0 else [255, 70, 70]
+                strips, cols = [], []
+                for (x1, y1, x2, y2) in segs:
+                    if lmask[c] is not None:
+                        xi1, yi1 = int(x1), int(y1); xi2, yi2 = int(x2), int(y2)
+                        h_, w_ = lmask[c].shape
+                        if (0 <= yi1 < h_ and 0 <= xi1 < w_ and lmask[c][yi1, xi1]) or \
+                           (0 <= yi2 < h_ and 0 <= xi2 < w_ and lmask[c][yi2, xi2]):
+                            continue          # on the rig's own hardware
+                    if rot180:
+                        p1 = [W - 1 - x1, H - 1 - y1]; p2 = [W - 1 - x2, H - 1 - y2]
+                    else:
+                        p1 = [x1, y1]; p2 = [x2, y2]
+                    strips.append([p1, p2]); cols.append(col)
+                if strips:
+                    rr.log(f"lines{c}/image/segments",
+                           rr.LineStrips2D(strips, colors=cols, radii=1.4))
+                    rr.log(f"plots/kp_count/lines{c}", rr.Scalars(float(len(strips))))
+
         if kts is None or not len(kts):
             continue
         j = int(np.argmin(np.abs(kts - t)))
         if abs(kts[j] - t) > 0.05:
             continue
         cur = kps[kts[j]]
+        if args.engine == "tum":
+            # rows are (cam, id, u, v, tracked). Draw each camera on its own
+            # pane in its own colour: FRONT blue, REAR red. Tracked features are
+            # bright, untracked dim -- so a tracking collapse is visible as the
+            # bright points vanishing, per camera.
+            for c in (0, 1):
+                sel = [r for r in cur if r[0] == c]
+                if not sel:
+                    continue
+                # Colour is decided by WHICH LENS this observation came from,
+                # never by which lens first saw the landmark. A feature drawn on
+                # the rear pane is red even if its landmark originated up front.
+                base = [60, 130, 255] if c == 0 else [255, 70, 70]
+                xy, co = [], []
+                for (_, _id, u, v, tr) in sel:
+                    xy.append([W - 1 - u, H - 1 - v] if rot180 else [u, v])
+                    co.append(base if tr else [int(x * 0.35) for x in base])
+                rr.log(f"cam{c}/image/keypoints",
+                       rr.Points2D(np.array(xy), colors=co, radii=2.2))
+                rr.log(f"plots/kp_count/cam{c}",
+                       rr.Scalars(float(sum(1 for r in sel if r[4]))))
+            continue
         alive = set()
         for fid, u, v in cur:
             hist[fid].append((u, v))
