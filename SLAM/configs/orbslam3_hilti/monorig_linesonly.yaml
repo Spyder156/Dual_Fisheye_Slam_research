@@ -1,0 +1,145 @@
+%YAML:1.0
+# ORB-SLAM3 monocular-inertial on the Hilti dual-fisheye rig, cam0 only.
+#
+# WHY MONO: ORB-SLAM3's stereo-fisheye path assumes the two lenses share a
+# field of view. Ours are back-to-back and share nothing, so stereo would be
+# matching across a boundary that does not exist -- the same class of bug we
+# just fixed in OKVIS2. Mono-inertial is the honest mode for this rig.
+#
+# Intrinsics/extrinsics are the official Hilti calibration (identical numbers
+# to SLAM/configs/hilti_fast and SLAM/configs/okvis_hilti).
+File.version: "1.0"
+
+Camera.type: "KannalaBrandt8"
+
+Camera1.fx: 465.3015482593691
+Camera1.fy: 465.32303798346413
+Camera1.cx: 730.0455886686005
+Camera1.cy: 720.1427007671206
+
+Camera1.k1: 0.025800718903376804
+Camera1.k2: -0.010909240777406872
+Camera1.k3: -0.0016899537986031076
+Camera1.k4: 0.00014766801645260894
+
+# Validity mask, NONZERO == MASKED (same convention/file as OpenVINS)
+#Camera1.mask: (disabled for repeatability test)
+
+Camera.width: 1472
+Camera.height: 1440
+
+Camera.fps: 30
+Camera.RGB: 1
+
+# T_b_c1 = camera -> IMU (body), i.e. the same T_SC used by OKVIS2 and the
+# inverse of Hilti's T_cam_imu.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ 0.0172144747722161,  0.9998263174555488, -0.0071412030913354, -0.0160046769358047,
+          -0.0008034642120502, -0.0071284262145564, -0.9999742696614562, -0.0156241207009497,
+          -0.9998514971252359,  0.0172197695390673,  0.0006806125511055,  0.0204108511207645,
+           0.0, 0.0, 0.0, 1.0]
+
+# Official Hilti IMU noise densities (same values as the OKVIS2 config).
+IMU.NoiseGyro: 0.00047032046
+IMU.NoiseAcc: 0.00285891188
+IMU.GyroWalk: 0.00036433633
+IMU.AccWalk: 0.00130039805
+IMU.Frequency: 990.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+# 1500 is the TUM-VI fisheye default; our image is ~8x the pixel count, so we
+# scale up rather than starve the tracker (feature starvation already cost us
+# a week on OpenVINS -- see experiments.md).
+ORBextractor.nFeatures: 2500
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters (headless: driven with Pangolin off)
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0
+Viewer.imageViewScale: 0.5
+
+#--------------------------------------------------------------------------------------------
+# Rig (non-overlapping, back-to-back). Extrinsics from Step 0:
+#   COLMAP rig-constrained BA (rotation) + robust median (translation),
+#   metric scale from IMU visual-inertial alignment. NOT an assumed 180 deg.
+#--------------------------------------------------------------------------------------------
+Rig.enabled: 1
+Rig.baseline_from_start: 1
+Rig.refine_rotation: 1
+Rig.refine_translation: 0
+Rig.T_c0_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: d
+   data: [-0.9997965745, 0.0184362784, 0.0081800545, 0.0029923271,
+          0.0184808756, 0.9998145759, 0.0054102670, -0.0010378471,
+          -0.0080787925, 0.0055603410, -0.9999519067, -0.0400242835,
+          0.0, 0.0, 0.0, 1.0]
+
+#--------------------------------------------------------------------------------------------
+# Camera 2 (rear lens). Present on the MONOCULAR path because a non-overlapping
+# rig is two mono cameras, not a stereo pair -- Experiment B.
+# overlappingBegin/End are REQUIRED by Settings for KannalaBrandt8 but are
+# meaningless here: there is no shared field of view. Set degenerate so that if
+# anything ever does consult them, it finds an empty region rather than a
+# plausible-looking wrong one.
+#--------------------------------------------------------------------------------------------
+Camera2.fx: 465.43630225493564
+Camera2.fy: 465.4719940813323
+Camera2.cx: 733.436396975063
+Camera2.cy: 718.7408714249976
+Camera2.k1: 0.024723386256038673
+Camera2.k2: -0.010754674082879279
+Camera2.k3: -0.0016168993760219885
+Camera2.k4: 0.00013675348254771203
+Camera2.overlappingBegin: 0
+Camera2.overlappingEnd: 0
+Camera1.overlappingBegin: 0
+Camera1.overlappingEnd: 0
+
+# Full METRIC rig. Settings uses it only for b_/bf_; the live Tlr comes from the
+# Rig object and starts at ZERO translation (phase 1).
+Stereo.T_c1_c2: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [-0.9997965745, 0.0184362784, 0.0081800545, 0.0029923271,
+          0.0184808756, 0.9998145759, 0.0054102670, -0.0010378471,
+          -0.0080787925, 0.0055603410, -0.9999519067, -0.0400242835,
+          0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+Stereo.ThDepth: 35.0
+
+#--------------------------------------------------------------------------------------------
+# Spherical line features (ELSED -> great-circle normals).
+# Measured on run_2 at the frames where point tracking collapses to 0-2:
+#   ELSED still yields 643-993 segments per camera, and 428 track.
+# maxAngLenDeg is not cosmetic: ELSED finds lines straight in the IMAGE, but a
+# straight WORLD line is curved on a fisheye, so a long arc's endpoints define a
+# plane its middle does not lie on (~4e-3 rad at 37 deg).
+#--------------------------------------------------------------------------------------------
+Lines.enabled: 1
+Lines.only: 1
+Lines.minAngLenDeg: 1.5
+Lines.maxAngLenDeg: 40.0
+Lines.mask0: "/config/masks/selfocc_cam0.png"
+Lines.mask1: "/config/masks/selfocc_cam1.png"
+Lines.gradThresh: 30
+Lines.minLenPx: 15
