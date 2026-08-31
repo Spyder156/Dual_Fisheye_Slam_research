@@ -94,7 +94,94 @@ def lift(segs, cam, mask, min_ang, max_ang):
     return s, n, d, ang
 
 
-def match(nc, dc, ac, np_, dp, ap):
+def imu_rotation(imu, t1, t2, R_bc):
+    """Camera rotation between two frame times, from the gyro.
+
+    A line's great-circle normal rotates with the camera. Comparing raw normals
+    forces the 3 deg gate to absorb real camera motion, which is the same thing
+    as leaving it wide enough to admit a parallel neighbour. Rotating the
+    previous frame's normals into the current frame first removes the motion, so
+    the gate only has to judge whether it is the SAME line.
+
+    The gyro lives in the body frame, so the camera-frame rotation is
+        R_c2c1 = R_bc^T * dR^T * R_bc
+    with dR the body rotation integrated from t1 to t2 (R_w_b2 = R_w_b1 * dR).
+    """
+    m = (imu[:, 0] >= min(t1, t2)) & (imu[:, 0] <= max(t1, t2))
+    w, tt = imu[m, 1:4], imu[m, 0]
+    if len(tt) < 2:
+        return np.eye(3)
+    dR = np.eye(3)
+    for k in range(1, len(tt)):
+        dt = tt[k] - tt[k - 1]
+        th = w[k - 1] * dt
+        a = np.linalg.norm(th)
+        if a < 1e-12:
+            continue
+        kx = th / a
+        K = np.array([[0, -kx[2], kx[1]], [kx[2], 0, -kx[0]], [-kx[1], kx[0], 0]])
+        dR = dR @ (np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * K @ K)
+    return R_bc.T @ dR.T @ R_bc
+
+
+def lbd(img, segs, n_bands=9, band_w=7, max_along=40):
+    """Line Band Descriptor (Zhang & Koser 2013), the standard line descriptor.
+
+    Our matcher currently identifies a line by geometry alone -- which plane it
+    lies in, which way it points, how long it is. Indoors that is close to
+    useless: the two edges of a door frame, or adjacent ceiling panels, have
+    near-identical signatures, so the matcher picks between parallel neighbours
+    essentially at random. LBD gives a line an APPEARANCE fingerprint, which is
+    what points have had all along in their ORB descriptor.
+
+    Method: take a band around the segment, aligned with it, split across the
+    line into n_bands strips. In each strip accumulate the image gradient
+    projected onto the line direction (dL) and its normal (dO), split into
+    positive and negative parts. Per strip that is a 4-vector per pixel; the
+    strip's mean and std of those give 8 numbers, so 9 strips -> 72 dims.
+    Gaussian weighting favours strips near the line, as in the paper.
+    """
+    gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
+    H, W = img.shape
+    rows = n_bands * band_w
+    off = np.arange(rows, dtype=np.float32) - (rows - 1) / 2.0
+    # global Gaussian across the band: strips near the line matter most
+    wg = np.exp(-(off ** 2) / (2.0 * (0.5 * rows / 2.0) ** 2)).astype(np.float32)
+    out = np.zeros((len(segs), n_bands * 8), np.float32)
+    for k, (x1, y1, x2, y2) in enumerate(np.asarray(segs, float).reshape(-1, 4)):
+        dx, dy = x2 - x1, y2 - y1
+        L = float(np.hypot(dx, dy))
+        if L < 2:
+            continue
+        ux, uy = dx / L, dy / L          # along the line
+        vx, vy = -uy, ux                 # across it
+        na = int(np.clip(L, 5, max_along))
+        t = np.linspace(0.0, 1.0, na, dtype=np.float32)
+        px = x1 + t * dx                                   # (na,)
+        py = y1 + t * dy
+        X = px[None, :] + off[:, None] * vx                # (rows, na)
+        Y = py[None, :] + off[:, None] * vy
+        xi = np.clip(np.rint(X).astype(np.int32), 0, W - 1)
+        yi = np.clip(np.rint(Y).astype(np.int32), 0, H - 1)
+        Gx, Gy = gx[yi, xi], gy[yi, xi]
+        dL = Gx * ux + Gy * uy
+        dO = Gx * vx + Gy * vy
+        f = np.stack([np.maximum(dL, 0), np.maximum(-dL, 0),
+                      np.maximum(dO, 0), np.maximum(-dO, 0)], 0)   # (4, rows, na)
+        f = f * wg[None, :, None]
+        for j in range(n_bands):
+            b = f[:, j * band_w:(j + 1) * band_w, :].reshape(4, -1)
+            out[k, j*8:j*8+4] = b.mean(1)
+            out[k, j*8+4:j*8+8] = b.std(1)
+    n = np.linalg.norm(out, axis=1, keepdims=True)
+    out = out / np.maximum(n, 1e-9)
+    out = np.clip(out, 0, 0.2)                    # SIFT-style clamp, then renorm
+    n = np.linalg.norm(out, axis=1, keepdims=True)
+    return out / np.maximum(n, 1e-9)
+
+
+def match(nc, dc, ac, np_, dp, ap, desc_c=None, desc_p=None, desc_max=None):
     """The estimator's greedy best-first matcher, gates and all."""
     assign = np.full(len(nc), -1, int)
     if not len(nc) or not len(np_):
@@ -105,7 +192,15 @@ def match(nc, dc, ac, np_, dp, ap):
     hi = np.maximum(ac[:, None], ap[None, :])
     ok = (an >= np.cos(GATE_NORMAL)) & (ad >= np.cos(GATE_DIR)) & \
          (lo / np.maximum(hi, 1e-12) >= GATE_LEN_RATIO)
-    cand = [(an[i, j], i, j) for i, j in zip(*np.where(ok))]
+    if desc_c is not None and len(desc_c) and len(desc_p):
+        # APPEARANCE. The geometric gates only say "a line like this was
+        # somewhere near here"; the descriptor says "and it looked like this".
+        # Rank by appearance and reject poor descriptor agreement outright.
+        dd = np.linalg.norm(desc_c[:, None, :] - desc_p[None, :, :], axis=2)
+        ok &= (dd <= desc_max)
+        cand = [(-dd[i, j], i, j) for i, j in zip(*np.where(ok))]
+    else:
+        cand = [(an[i, j], i, j) for i, j in zip(*np.where(ok))]
     cand.sort(key=lambda c: -c[0])
     usedp = np.zeros(len(np_), bool)
     for _, i, j in cand:                          # one-to-one, best normal first
@@ -168,10 +263,32 @@ def main():
                     help="draw only correspondences that move more than "
                          "--suspect-px, i.e. the ones most likely to be wrong")
     ap.add_argument("--suspect-px", type=float, default=60.0)
+    ap.add_argument("--lbd", action="store_true", help="add the LBD appearance gate")
+    ap.add_argument("--desc-max", type=float, default=0.55,
+                    help="max LBD L2 distance for a match")
+    ap.add_argument("--imu-prior", action="store_true",
+                    help="rotate previous-frame normals by the gyro first")
+    ap.add_argument("--gate-normal", type=float, default=3.0,
+                    help="normal-alignment gate [deg]; can be tightened once "
+                         "the IMU prior removes the real camera motion")
     a = ap.parse_args()
 
+    global GATE_NORMAL
+    GATE_NORMAL = np.deg2rad(a.gate_normal)
     ds = Path(a.dataset); out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     cams = [load_cam(a.config, c) for c in (0, 1)]
+    imu = R_bc = ftab = None
+    if a.imu_prior:
+        imu = np.loadtxt(ds / "imu.csv", delimiter=",", skiprows=1)
+        txt = Path(a.config).read_text()
+        mm = re.search(r"IMU.T_b_c1:.*?data:\s*\[(.*?)\]", txt, re.S)
+        T_b_c = np.array([float(x) for x in
+                          re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", mm.group(1))
+                          ]).reshape(4, 4)
+        R_bc = T_b_c[:3, :3]
+        fr = np.genfromtxt(ds / "frames.csv", delimiter=",", names=True)
+        ftab = dict(zip(np.atleast_1d(fr["frame"]).astype(int),
+                        np.atleast_1d(fr["t"])))
     masks = [None, None]
     if a.masks:
         for c in (0, 1):
@@ -186,7 +303,8 @@ def main():
 
     mn, mx = np.deg2rad(a.min_ang), np.deg2rad(a.max_ang)
     rng = np.random.default_rng(0)
-    print(f"{'pair':>12s} {'cam':>4s} {'A':>6s} {'B':>6s} {'matched':>8s} {'rate':>7s}")
+    print(f"{'pair':>12s} {'cam':>4s} {'A':>6s} {'B':>6s} {'matched':>8s} {'rate':>7s}"
+          f" {'consist':>8s} {'med_px':>8s}")
     for f0 in firsts:
         f1 = f0 + a.gap
         panes = []
@@ -197,12 +315,35 @@ def main():
                 continue
             sA, nA, dA, aA = lift(segs[c].get(f0, []), cams[c], masks[c], mn, mx)
             sB, nB, dB, aB = lift(segs[c].get(f1, []), cams[c], masks[c], mn, mx)
+            dcA = lbd(imA, sA) if a.lbd else None
+            dcB = lbd(imB, sB) if a.lbd else None
+            nA_use, dA_use = nA, dA
+            if a.imu_prior and len(nA):
+                Rp = imu_rotation(imu, ftab[f0], ftab[f1], R_bc)
+                nA_use = nA @ Rp.T                  # previous normals, predicted
+                dA_use = dA @ Rp.T
             # B is "current", A is "previous" -- the estimator's direction
-            asg = match(nB, dB, aB, nA, dA, aA)
+            asg = match(nB, dB, aB, nA_use, dA_use, aA, dcB, dcA, a.desc_max)
             nm = int((asg >= 0).sum())
             rate = 100.0 * nm / max(len(nB), 1)
+            # PRECISION, not just rate. Between frames 33 ms apart the true
+            # motion is small and consistent, so the correct matches share one
+            # dominant displacement. Fitting that displacement robustly and
+            # counting agreement estimates how many matches are actually RIGHT
+            # -- a matcher that pairs everything wrongly scores a high rate and
+            # a terrible inlier fraction.
+            mv = np.array([[ (sB[i,0]+sB[i,2])/2 - (sA[j,0]+sA[j,2])/2,
+                             (sB[i,1]+sB[i,3])/2 - (sA[j,1]+sA[j,3])/2 ]
+                           for i, j in enumerate(asg) if j >= 0])
+            if len(mv) >= 8:
+                med = np.median(mv, axis=0)
+                resid = np.linalg.norm(mv - med, axis=1)
+                inl = 100.0 * float((resid <= 12.0).mean())
+                mdisp = float(np.median(np.linalg.norm(mv, axis=1)))
+            else:
+                inl, mdisp = float("nan"), float("nan")
             print(f"{f0:6d}->{f1:<5d} {c:>4d} {len(sA):>6d} {len(sB):>6d} "
-                  f"{nm:>8d} {rate:>6.1f}%")
+                  f"{nm:>8d} {rate:>6.1f}% {inl:>8.1f}% {mdisp:>8.1f}")
 
             colA = [((80, 80, 80), False)] * len(sA)
             colA = list(colA)
