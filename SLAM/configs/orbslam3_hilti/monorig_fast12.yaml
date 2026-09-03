@@ -58,8 +58,8 @@ IMU.Frequency: 990.0
 ORBextractor.nFeatures: 2500
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
-ORBextractor.iniThFAST: 20
-ORBextractor.minThFAST: 7
+ORBextractor.iniThFAST: 12
+ORBextractor.minThFAST: 4
 
 #--------------------------------------------------------------------------------------------
 # Viewer Parameters (headless: driven with Pangolin off)
@@ -126,19 +126,3 @@ Stereo.T_c1_c2: !!opencv-matrix
           -0.0080787925, 0.0055603410, -0.9999519067, -0.0400242835,
           0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
 Stereo.ThDepth: 35.0
-
-#--------------------------------------------------------------------------------------------
-# Spherical line features (ELSED -> great-circle normals).
-# Measured on run_2 at the frames where point tracking collapses to 0-2:
-#   ELSED still yields 643-993 segments per camera, and 428 track.
-# maxAngLenDeg is not cosmetic: ELSED finds lines straight in the IMAGE, but a
-# straight WORLD line is curved on a fisheye, so a long arc's endpoints define a
-# plane its middle does not lie on (~4e-3 rad at 37 deg).
-#--------------------------------------------------------------------------------------------
-Lines.enabled: 1
-Lines.minAngLenDeg: 1.5
-Lines.maxAngLenDeg: 40.0
-Lines.mask0: "/config/masks/selfocc_cam0.png"
-Lines.mask1: "/config/masks/selfocc_cam1.png"
-Lines.gradThresh: 30
-Lines.minLenPx: 15

@@ -135,7 +135,8 @@ Stereo.ThDepth: 35.0
 # straight WORLD line is curved on a fisheye, so a long arc's endpoints define a
 # plane its middle does not lie on (~4e-3 rad at 37 deg).
 #--------------------------------------------------------------------------------------------
-Lines.enabled: 1
+Lines.enabled: 0
+Tracking.blindInliers: 0
 Lines.minAngLenDeg: 1.5
 Lines.maxAngLenDeg: 40.0
 Lines.mask0: "/config/masks/selfocc_cam0.png"
