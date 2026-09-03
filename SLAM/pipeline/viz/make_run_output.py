@@ -249,6 +249,8 @@ def main():
                     help="line_extract binary; enables the two LINE panes")
     ap.add_argument("--line-masks", default=None,
                     help="dir with selfocc_cam{0,1}.png, applied as in the SLAM")
+    ap.add_argument("--split-3d", action="store_true",
+                    help="two 3D views: points-only map and lines-only map")
     ap.add_argument("--max-depth", type=float, default=30.0,
                     help="drop landmarks further than this from the camera that "
                          "created them (display only)")
@@ -262,6 +264,7 @@ def main():
     # ---------------- load trajectory + points + per-frame keypoints ----------
     kps = None          # dict t -> list of (id, u, v)
     stats = None
+    ln_t = ln_a = ln_b = None      # 3D map lines
     if args.engine == "openvins":
         d = load_csv_loose(args.traj, 8)
         T, P, Q = d[:, 0], d[:, 1:4], d[:, 4:8]
@@ -292,6 +295,15 @@ def main():
                 pt_t, pts, pt_cam = m[:, 0], m[:, 1:4], None
         else:
             pt_t, pts, pt_cam = None, np.zeros((0, 3)), None
+        # 3D MAP LINES, columns t,x1,y1,z1,x2,y2,z2. Drawing lines and points
+        # in one 3D view is the direct test for a coordinate mismatch between
+        # them: if the two disagree about the world, the lines will not lie on
+        # the structure the points describe.
+        lf = Path(str(args.traj).replace("f_", "ml_").replace(".txt", ".csv"))
+        if lf.exists():
+            L = load_csv_loose(lf, 7)
+            if len(L):
+                ln_t, ln_a, ln_b = L[:, 0], L[:, 1:4], L[:, 4:7]
         # per-frame keypoints, columns t,cam,id,u,v,tracked
         kf2 = Path(str(args.traj).replace("f_", "kp_").replace(".txt", ".csv"))
         if kf2.exists():
@@ -411,6 +423,9 @@ def main():
             Q = Rotation.from_matrix(R_al @ Rotation.from_quat(Q).as_matrix()).as_quat()
             if len(pts):
                 pts = (R_al @ pts.T).T + t_al
+            if ln_a is not None and len(ln_a):
+                ln_a = (R_al @ ln_a.T).T + t_al     # lines ride the same Sim3
+                ln_b = (R_al @ ln_b.T).T + t_al
             if len(pts_all_t):
                 pts_all_t = (R_al @ pts_all_t.T).T + t_al
             print("estimate aligned into the GT frame (map rides the same transform)")
@@ -450,7 +465,32 @@ def main():
     # Place the eye explicitly: auto-fit is unreliable once any outlier survives,
     # and a 3/4 view from above shows a walked floor plan best. 1 m grid gives scale.
     eye = ctr + np.array([0.55, -0.95, 0.75]) * max(S, 1.0)
+    # --split-3d: judge points and lines as maps INDEPENDENTLY -- two 3D views,
+    # same trajectory and cameras in both, one shows only the point cloud and
+    # the other only the line map.
+    common = ["/world/traj", "/world/gt", "/world/cam0/**", "/world/cam1/**"]
+    if args.split_3d:
+        view3d = rrb.Vertical(
+            rrb.Spatial3DView(origin="/world", name="POINTS only",
+                              contents=common + ["/world/points"],
+                              eye_controls=rrb.archetypes.EyeControls3D(
+                                  position=eye.tolist(), look_target=ctr.tolist(),
+                                  eye_up=[0, 0, 1]),
+                              line_grid=rrb.archetypes.LineGrid3D(
+                                  visible=True, spacing=1.0, stroke_width=1.0,
+                                  color=[70, 70, 78, 140])),
+            rrb.Spatial3DView(origin="/world", name="LINES only",
+                              contents=common + ["/world/lines"],
+                              eye_controls=rrb.archetypes.EyeControls3D(
+                                  position=eye.tolist(), look_target=ctr.tolist(),
+                                  eye_up=[0, 0, 1]),
+                              line_grid=rrb.archetypes.LineGrid3D(
+                                  visible=True, spacing=1.0, stroke_width=1.0,
+                                  color=[70, 70, 78, 140])))
+    else:
+        view3d = None
     bp = rrb.Blueprint(rrb.Horizontal(
+        view3d if view3d is not None else
         rrb.Spatial3DView(
             origin="/world", name="map + trajectory", contents="/world/**",
             eye_controls=rrb.archetypes.EyeControls3D(
@@ -508,6 +548,51 @@ def main():
               f"({100*n_col/len(pts):.1f}%); rest left neutral grey")
     elif len(pts):
         cols = np.tile(np.array([[150, 150, 160]], np.uint8), (len(pts), 1))
+
+    if ln_a is not None and len(ln_a):
+        # cull with the same rule as the points: a line whose midpoint is far
+        # from the camera that made it is a failed triangulation
+        mid = 0.5 * (ln_a + ln_b)
+        Aln = np.stack([np.interp(ln_t, T, P[:, i]) for i in range(3)], 1)
+        keepl = np.linalg.norm(mid - Aln, axis=1) <= args.max_depth
+        ln_t, ln_a, ln_b = ln_t[keepl], ln_a[keepl], ln_b[keepl]
+        if len(ln_t) > 40000:
+            _s = np.random.default_rng(0).choice(len(ln_t), 40000, replace=False)
+            ln_t, ln_a, ln_b = ln_t[_s], ln_a[_s], ln_b[_s]
+        print(f"map lines drawn: {len(ln_t)} (culled {int((~keepl).sum())} "
+              f"beyond {args.max_depth:.0f} m)")
+        # SAME SCHEME AS THE POINTS: colour each line by the LENS that saw it.
+        # The dump has no camera column, but on a back-to-back rig a line is
+        # visible in exactly one lens: express its midpoint in each camera at
+        # its reference time and take the smaller angle from that optical axis.
+        lcols = np.full((len(ln_t), 3), [235, 200, 60], np.uint8)
+        if cams:
+            Rw_l = Rotation.from_quat(Q).as_matrix()
+            ji = np.clip(np.searchsorted(T, ln_t), 0, len(T) - 1)
+            midw = 0.5 * (ln_a + ln_b)
+            th = []
+            for c, camx in enumerate(cams[:2]):
+                R_CtoG = np.einsum('nij,jk->nik', Rw_l[ji], camx["T"][:3, :3])
+                p_CinG = P[ji] + np.einsum('nij,j->ni', Rw_l[ji], camx["T"][:3, 3])
+                Pc = np.einsum('nji,nj->ni', R_CtoG, midw - p_CinG)
+                th.append(np.arctan2(np.hypot(Pc[:, 0], Pc[:, 1]), Pc[:, 2]))
+            front = th[0] <= th[1] if len(th) > 1 else np.ones(len(ln_t), bool)
+            lcols[front] = [60, 130, 255]      # front lens -> blue
+            lcols[~front] = [255, 70, 70]      # rear lens  -> red
+            print(f"map lines by lens: front(blue) {int(front.sum())}, "
+                  f"rear(red) {int((~front).sum())}")
+        order_l = np.argsort(ln_t)
+        tsl = ln_t[order_l]
+        tb = np.linspace(T[0], T[-1], 240)
+        for tt in tb:
+            k = int(np.searchsorted(tsl, tt))
+            if k < 4:
+                continue
+            set_t(float(tt))
+            sel = order_l[:k]
+            rr.log("world/lines", rr.LineStrips3D(
+                [[ln_a[i], ln_b[i]] for i in sel],
+                colors=lcols[sel], radii=S * 0.00006))
 
     if cols is not None:
         if pt_t_kept is not None and len(pt_t_kept) == len(pts):
