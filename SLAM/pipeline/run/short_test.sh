@@ -13,10 +13,13 @@ W="$(cd "$(dirname "$0")/../../.." && pwd)"
 CFG="$1"; OUT="$2"; SECS="${3:-20}"
 mkdir -p "$W/$OUT"
 # Data/ and SLAM/experiments are absolute symlinks onto the 4TB drive; mount
-# the drive at the same path inside the container or they dangle there.
+# the drive at the same path inside the container or they dangle there. The
+# mount point moved once already (media -> /mnt/UUID), so RESOLVE it from the
+# symlink instead of hardcoding.
+DRIVE="$(readlink -f "$W/Data")"; DRIVE="${DRIVE%/INSV_STITCHING/Data}"
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp \
   -w "/ws/$OUT" -v "$W:/ws" \
-  -v /media/raghav/HardDrive1:/media/raghav/HardDrive1 \
+  -v "$DRIVE:$DRIVE" \
   -v "$W/SLAM/configs/orbslam3_hilti:/config" insv/orbslam3 bash -c "
   export LD_LIBRARY_PATH=/ws/SLAM/third_party/ORB_SLAM3/lib:/ws/SLAM/third_party/ORB_SLAM3/Thirdparty/DBoW2/lib:/ws/SLAM/third_party/ORB_SLAM3/Thirdparty/g2o/lib:\$LD_LIBRARY_PATH
   stdbuf -oL -eL /ws/SLAM/third_party/ORB_SLAM3/Examples/Monocular-Inertial/mono_rig_euroc \
