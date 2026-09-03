@@ -34,3 +34,9 @@ SLAM/experiments/**/*.csv
 
 # separate project, not part of this repo
 open-insv-gpu/
+
+# checkpoint 2026-09: drive symlinks + heavy artifacts
+Data
+SLAM/experiments
+SLAM/Papers/
+SLAM/results/
