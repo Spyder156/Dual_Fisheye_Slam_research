@@ -115,10 +115,14 @@ physical edge between frames (clipping), so endpoints are treated as
    `linearizeOplus`, so g2o numeric-differentiates through that exact oplus
    (right-perturbation convention consistent by construction). A lines-only
    synthetic convergence test remains queued.
-4. **Keyframe thread lottery — experiment in flight.** LOCKSTEP mode added
-   (tracking drains LocalMapping every frame); 3 lockstep vs 3 free replicates
-   running with fixes 1–2 in. Per-dark-frame *landmark-backed* line counts now
-   logged to settle the "corpses have ~0 line edges" bet.
+4. **Keyframe thread lottery — REFUTED by the decisive experiment.** LOCKSTEP
+   mode (tracking drains LocalMapping every frame) run 3-vs-3 against free
+   threading, fixes 1–2 included: lockstep 0.15/0.00/0.12 vs free
+   0.40/0.07/0.04 — determinism does not rescue the crossing. The
+   landmark-backed bet also resolved: failing runs carry **230–314**
+   landmark-backed line edges per dark frame and die regardless. Lines are
+   present and voting through the dark window — which moves suspicion to #5:
+   blur-biased line measurements at full weight may be actively harmful there.
 5. **Blur-scaled σ / exposure-offset** — queued (needs residual-vs-ω
    instrumentation on dark frames).
 6. **T_c0_c1 orientation sign** — partially screened (cam0/cam1 line chi2
