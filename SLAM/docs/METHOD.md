@@ -48,8 +48,9 @@ single global inlier count still gates tracking (known weakness).
   ranking made *wrong* matches persistent and was demoted to an optional veto.)
 - **Landmark lifecycle** (built to mirror what points get):
   anchor at first sight → triangulate when plane parallax ≥ 2° by
-  intersecting the two interpretation planes → **direction gate** (triangulated
-  `d` must agree with the observed chord within 15° — the only check the
+  intersecting the two interpretation planes → **extent-overlap gate** (both
+  observations' endpoint rays back-projected onto the candidate line must cut
+  overlapping along-line intervals — the correspondence check the
   aperture-blind residual cannot do) → **cheirality gate** (the line must
   intersect both observed bearings at positive depth; the mirror solution of a
   marginal-parallax plane intersection was 41% of creations before this) →
