@@ -61,6 +61,7 @@ for i in $(seq 1 "$N"); do
 
   if [ -s "$W/$R/f_orb.txt" ]; then
     line=$(python "$W/SLAM/pipeline/run/hilti_score.py" "$W/$R/f_orb.txt" "$GT" \
+           --config "$W/$CFG" \
            | tee "$W/$R/score.txt" | awk '/^CSV /{print $2}')
   else
     line=""
