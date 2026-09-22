@@ -4,9 +4,10 @@
 Metrics: ATE RMSE after SE(3) Umeyama alignment (challenge protocol), coverage,
 and the official challenge score  S = mean(100 * exp(-0.46051701859880917 * e_i)).
 
-Usage: hilti_score.py <traj.csv> <groundtruth.txt>
-  traj.csv : t,px,py,pz,qx,qy,qz,qw   (our run_folder output)
-  gt.txt   : TUM  # timestamp tx ty tz qx qy qz qw
+Usage: hilti_score.py <traj> <groundtruth.txt>
+  traj : either traj.csv (t,px,py,pz,qx,qy,qz,qw header, t in seconds)
+         or f_orb.txt    (TUM, space-separated, no header, t in NANOSECONDS)
+  gt.txt : TUM  # timestamp tx ty tz qx qy qz qw   (t in seconds)
 """
 import argparse
 from pathlib import Path
@@ -26,6 +27,26 @@ def umeyama_se3(A, B):
     return R, mB - R @ mA
 
 
+def load_traj(path):
+    """Estimate positions (te [s], Pe Nx3 [m], world frame of the estimator).
+
+    Sniffs the two formats we produce: comma = traj.csv with header (t already
+    seconds); whitespace = f_orb.txt straight out of the estimator, t in int64
+    NANOSECONDS on the dataset clock (same clock as GT)."""
+    with open(path) as f:
+        first = f.readline()
+    if "," in first:
+        d = np.genfromtxt(path, delimiter=",", names=True)
+        te = np.atleast_1d(d["t"])
+        Pe = np.stack([d["px"], d["py"], d["pz"]], 1)
+    else:
+        a = np.loadtxt(path)
+        te, Pe = a[:, 0], a[:, 1:4]
+    if te[0] > 1e12:  # nanoseconds -> seconds
+        te = te / 1e9
+    return te, Pe
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("traj", type=Path)
@@ -34,9 +55,7 @@ def main():
                     help="max timestamp difference to accept a match [s]")
     args = ap.parse_args()
 
-    d = np.genfromtxt(args.traj, delimiter=",", names=True)
-    te = np.atleast_1d(d["t"])
-    Pe = np.stack([d["px"], d["py"], d["pz"]], 1)
+    te, Pe = load_traj(args.traj)
 
     g = np.loadtxt(args.gt)
     tg, Pg = g[:, 0], g[:, 1:4]
@@ -64,6 +83,8 @@ def main():
     print(f"  mean/med   : {err.mean():.4f} / {np.median(err):.4f} m")
     print(f"  max/min    : {err.max():.4f} / {err.min():.4f} m")
     print(f"CHALLENGE SCORE : {score:.2f} / 100")
+    # machine-readable line for the N-run harness (nrun.sh)
+    print(f"CSV {score:.2f},{rmse:.4f},{cov:.2f}")
 
 
 if __name__ == "__main__":
