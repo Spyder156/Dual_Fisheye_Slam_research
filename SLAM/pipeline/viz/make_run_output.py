@@ -251,6 +251,11 @@ def main():
                     help="dir with selfocc_cam{0,1}.png, applied as in the SLAM")
     ap.add_argument("--split-3d", action="store_true",
                     help="two 3D views: points-only map and lines-only map")
+    ap.add_argument("--min-line-support", type=float, default=0,
+                    help="draw only map lines with at least this many support points")
+    ap.add_argument("--min-line-obs", type=float, default=0,
+                    help="draw only map lines with at least this many validated "
+                         "sightings (needs the 8-column ml dump)")
     ap.add_argument("--max-depth", type=float, default=30.0,
                     help="drop landmarks further than this from the camera that "
                          "created them (display only)")
@@ -301,7 +306,20 @@ def main():
         # the structure the points describe.
         lf = Path(str(args.traj).replace("f_", "ml_").replace(".txt", ".csv"))
         if lf.exists():
-            L = load_csv_loose(lf, 7)
+            # 8th column (validated sightings) exists in newer dumps; older
+            # dumps fall back to 7 columns with no filtering possible.
+            L = load_csv_loose(lf, 10)
+            if not len(L):
+                L = load_csv_loose(lf, 8)
+            if len(L):
+                keep = L[:, 7] >= args.min_line_obs
+                if L.shape[1] >= 10:
+                    keep &= L[:, 9] >= args.min_line_support
+                print(f"line persistence filter: kept {int(keep.sum())}/{len(L)} "
+                      f"(validated >= {args.min_line_obs})")
+                L = L[keep]
+            else:
+                L = load_csv_loose(lf, 7)
             if len(L):
                 ln_t, ln_a, ln_b = L[:, 0], L[:, 1:4], L[:, 4:7]
         # per-frame keypoints, columns t,cam,id,u,v,tracked
@@ -508,7 +526,10 @@ def main():
                                   contents="/lines0/**"),
                 rrb.Spatial2DView(origin="/lines1", name="REAR lines (red)",
                                   contents="/lines1/**")),
-            rrb.TimeSeriesView(origin="/plots/kp_count", name="tracked keypoints per camera"),
+            rrb.Horizontal(
+                rrb.TimeSeriesView(origin="/plots/kp_count", name="tracked keypoints per camera"),
+                rrb.TimeSeriesView(origin="/plots/confidence",
+                                   name="confidence: inliers / state / coast")),
             row_shares=[3, 3, 1]),
         column_shares=[3, 2]))
     rr.init("slam_run", spawn=False)
@@ -524,6 +545,13 @@ def main():
     frames = np.genfromtxt(args.dataset / "frames.csv", delimiter=",", names=True)
     fids = np.atleast_1d(frames["frame"]).astype(int)
     fts = np.atleast_1d(frames["t"])
+    # Only frames inside the trajectory's time span. A 40 s run previously
+    # logged all 4951 frames of video (+ overlays) -- the .rrd ballooned and
+    # the viewer OOM-froze mid-ingest on partial runs.
+    mspan = (fts >= T[0] - 0.5) & (fts <= T[-1] + 0.5)
+    if mspan.sum() and mspan.sum() < len(fids):
+        print(f"video clamped to trajectory span: {int(mspan.sum())}/{len(fids)} frames")
+        fids, fts = fids[mspan], fts[mspan]
 
     # ---- colour the map ------------------------------------------------------
     # Pick the colours first, then log ONCE through the shared growth path
@@ -802,6 +830,24 @@ def main():
             if r[1] >= 0:
                 set_t(float(r[0]))
                 rr.log("plots/reproj_px", rr.Scalars(float(r[1])))
+
+    # ---- tracking confidence (f_conf.csv next to the trajectory) ------------
+    # t[s], state (2=OK 3=RECENTLY_LOST 4=LOST), inliers, keypoints, map id,
+    # coasting flag -- dumped by Tracking every frame. Inliers ARE the
+    # confidence; state and coast windows say who owned the pose.
+    conf_p = args.traj.parent / "f_conf.csv"
+    if args.engine == "tum" and conf_p.exists():
+        cf = np.genfromtxt(conf_p, delimiter=",", names=True)
+        cf = np.atleast_1d(cf)
+        for r in cf:
+            set_t(float(r["t"]))
+            rr.log("plots/confidence/inliers", rr.Scalars(float(r["inliers"])))
+            # OK -> 0, RECENTLY_LOST -> 50, LOST -> 100: reads as an alarm level
+            alarm = {2.0: 0.0, 3.0: 50.0}.get(float(r["state"]), 100.0)
+            rr.log("plots/confidence/state_alarm", rr.Scalars(alarm))
+            rr.log("plots/confidence/coasting", rr.Scalars(60.0 * float(r["coasting"])))
+        print(f"confidence plot: {len(cf)} frames "
+              f"({int((cf['coasting'] > 0).sum())} coasted)")
 
     imu = np.genfromtxt(args.dataset / "imu.csv", delimiter=",", names=True)
     ti, gy = imu["t"], np.stack([imu["gx"], imu["gy"], imu["gz"]], 1)
