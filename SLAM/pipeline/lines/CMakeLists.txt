@@ -20,4 +20,12 @@ if(DEFINED ORB_DIR)
       ${ELSED_DIR}/src ${OpenCV_INCLUDE_DIRS} ${ORB_DIR}/include
       ${ORB_DIR} ${ORB_DIR}/Thirdparty/Sophus ${EIGEN3_INCLUDE_DIR})
   target_link_libraries(line_track_test ${OpenCV_LIBS})
+
+  # merge invariance test: real MergeGreatCircles, synthetic fragments
+  add_executable(test_merge test_merge.cc ${ELSED_SRC}
+                 ${ORB_DIR}/src/LineExtractor.cc)
+  target_include_directories(test_merge PRIVATE
+      ${ELSED_DIR}/src ${OpenCV_INCLUDE_DIRS} ${ORB_DIR}/include
+      ${ORB_DIR} ${ORB_DIR}/Thirdparty/Sophus ${EIGEN3_INCLUDE_DIR})
+  target_link_libraries(test_merge ${OpenCV_LIBS})
 endif()
