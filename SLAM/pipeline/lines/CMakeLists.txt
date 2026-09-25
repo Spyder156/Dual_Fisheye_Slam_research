@@ -28,4 +28,12 @@ if(DEFINED ORB_DIR)
       ${ELSED_DIR}/src ${OpenCV_INCLUDE_DIRS} ${ORB_DIR}/include
       ${ORB_DIR} ${ORB_DIR}/Thirdparty/Sophus ${EIGEN3_INCLUDE_DIR})
   target_link_libraries(test_merge ${OpenCV_LIBS})
+
+  # two real frames through the real detect->mask->lift->merge->match
+  add_executable(two_frame_match two_frame_match.cc ${ELSED_SRC}
+                 ${ORB_DIR}/src/LineExtractor.cc)
+  target_include_directories(two_frame_match PRIVATE
+      ${ELSED_DIR}/src ${OpenCV_INCLUDE_DIRS} ${ORB_DIR}/include
+      ${ORB_DIR} ${ORB_DIR}/Thirdparty/Sophus ${EIGEN3_INCLUDE_DIR})
+  target_link_libraries(two_frame_match ${OpenCV_LIBS})
 endif()
