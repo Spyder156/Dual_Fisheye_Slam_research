@@ -44,9 +44,18 @@ struct KB4 {
     }
 };
 
-// detect + mask + lift, exactly as LineExtractor::Extract (ELSED params, mask
-// on EITHER endpoint, angular-length window, pxPerRad from the segment's own
-// pixel/angular length)
+static cv::Point2f kb_project(const KB4& cam, const Eigen::Vector3f& b) {
+    const double r = std::sqrt(double(b.x())*b.x() + double(b.y())*b.y());
+    const double th = std::atan2(r, (double)b.z());
+    const double t2 = th*th;
+    const double rd = th*(1 + cam.k1*t2 + cam.k2*t2*t2 + cam.k3*t2*t2*t2 + cam.k4*t2*t2*t2*t2);
+    const double s = r > 1e-9 ? rd/r : 0.0;
+    return cv::Point2f(float(cam.fx*b.x()*s + cam.cx), float(cam.fy*b.y()*s + cam.cy));
+}
+
+// detect + mask + lift + canonicalize, exactly as LineExtractor::Extract
+// (ELSED params, mask on EITHER endpoint, angular-length window, pxPerRad
+// from the segment's own pixel/angular length)
 static std::vector<LineObs> detect(const cv::Mat& img, const cv::Mat& mask,
                                    const KB4& cam) {
     static upm::ELSEDParams P;
@@ -79,9 +88,28 @@ static std::vector<LineObs> detect(const cv::Mat& img, const cv::Mat& mask,
         lo.angLen = ang;
         lo.pxPerRad = ang > 1e-6f ? float(cv::norm(a - b)) / ang : 400.f;
         lo.cam = 0;
+        LineExtractor::CanonicalizeObs(lo);
         out.push_back(lo);
     }
     return out;
+}
+
+// appearance for every (possibly merged) observation: sample the projected arc
+static void addDescriptors(const cv::Mat& img, const KB4& cam,
+                           std::vector<LineObs>& v) {
+    for (LineObs& o : v) {
+        LineExtractor::CanonicalizeObs(o);
+        std::vector<cv::Point2f> poly;
+        const float th = std::acos(std::max(-1.f, std::min(1.f, o.b1u.dot(o.b2u))));
+        for (int k = 0; k < 16; k++) {
+            const float t = float(k) / 15.f;
+            Eigen::Vector3f bk = th > 1e-6f
+                ? ((std::sin((1-t)*th)*o.b1u + std::sin(t*th)*o.b2u) / std::sin(th)).normalized()
+                : o.b1u;
+            poly.push_back(kb_project(cam, bk));
+        }
+        LineExtractor::ComputeBandDescriptor(img, poly, o);
+    }
 }
 
 static void dump(const std::string& path, const std::vector<LineObs>& v) {
@@ -120,14 +148,27 @@ int main(int argc, char** argv) {
     printf("detected (post-mask): A %zu  B %zu\n", a.size(), b.size());
     a = ext.MergeGreatCircles(a);             // the estimator's merge
     b = ext.MergeGreatCircles(b);
+    addDescriptors(A, cam, a);
+    addDescriptors(B, cam, b);
     printf("after merge:          A %zu  B %zu\n", a.size(), b.size());
 
-    std::vector<int> asg = ext.Match(b, a);   // the estimator's matcher, cur=B prev=A
+    // THE NEW MATCHER: persistent tracker, frame A seeds the tracks, frame B
+    // matches against them. dR = identity (33 ms; the SLAM feeds gyro here).
+    LineTracker trk;
+    std::vector<int> asgA = trk.Match(a, Eigen::Matrix3f::Identity());
+    trk.Commit(a, asgA);                      // A obs i -> track index i
+    std::vector<int> asg = trk.Match(b, Eigen::Matrix3f::Identity());
+    trk.Commit(b, asg);
+    const auto& st = trk.mStats;
+    printf("gates: cand %ld | kill normal %ld orth %ld overlap %ld polarity %ld "
+           "abs %ld ratio %ld | matched %ld\n",
+           st.nCand, st.killNormal, st.killOrth, st.killOverlap,
+           st.killPolarity, st.killAbs, st.killRatio, st.matched);
     int nm = 0;
     std::ofstream mf(out + "_match.csv");
     mf << "iB,iA\n";
     for (size_t i = 0; i < asg.size(); i++)
-        if (asg[i] >= 0) { mf << i << "," << asg[i] << "\n"; nm++; }
+        if (asg[i] >= 0 && asg[i] < (int)a.size()) { mf << i << "," << asg[i] << "\n"; nm++; }
     printf("matched: %d of B=%zu against A=%zu\n", nm, b.size(), a.size());
 
     dump(out + "_segA.csv", a);

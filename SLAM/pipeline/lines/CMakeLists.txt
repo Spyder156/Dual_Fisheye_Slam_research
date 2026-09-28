@@ -37,3 +37,13 @@ if(DEFINED ORB_DIR)
       ${ORB_DIR} ${ORB_DIR}/Thirdparty/Sophus ${EIGEN3_INCLUDE_DIR})
   target_link_libraries(two_frame_match ${OpenCV_LIBS})
 endif()
+
+if(DEFINED ORB_DIR)
+  # N-frame identity-persistence clip through the real tracker
+  add_executable(track_clip track_clip.cc ${ELSED_SRC}
+                 ${ORB_DIR}/src/LineExtractor.cc)
+  target_include_directories(track_clip PRIVATE
+      ${ELSED_DIR}/src ${OpenCV_INCLUDE_DIRS} ${ORB_DIR}/include
+      ${ORB_DIR} ${ORB_DIR}/Thirdparty/Sophus ${EIGEN3_INCLUDE_DIR})
+  target_link_libraries(track_clip ${OpenCV_LIBS})
+endif()
