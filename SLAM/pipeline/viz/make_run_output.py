@@ -286,7 +286,12 @@ def main():
     elif args.engine == "tum":
         # ORB-SLAM3 / TUM format: t[ns or s] tx ty tz qx qy qz qw, no header.
         d = np.loadtxt(args.traj)
-        T = d[:, 0] / (1e9 if d[0, 0] > 1e12 else 1.0)
+        # ns vs s: decide on the SPAN, not the first value. A recording whose
+        # clock starts near zero (our own .insv extractions) has small absolute
+        # timestamps in ns, and a first-value test reads them as seconds --
+        # giving a 40-year "duration" and an int64 overflow in rerun.
+        _span = float(d[-1, 0] - d[0, 0])
+        T = d[:, 0] / (1e9 if (d[0, 0] > 1e12 or _span > 1e6) else 1.0)
         P, Q = d[:, 1:4], d[:, 4:8]
         # sparse map, if SaveMapPoints() was run. Column 0 is the timestamp of
         # the first observing keyframe, so the cloud can GROW over time.

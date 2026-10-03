@@ -77,12 +77,14 @@ def extract_imu(video: Path, out_csv: Path) -> dict:
 
 
 def extract_frames(video: Path, out_dir: Path, fps: float | None, ext: str,
-                   rotate180: bool, stream: int = 0) -> int:
+                   rotate180: bool, stream: int = 0, scale: str = "") -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-map", f"0:v:{stream}"]
     vf = []
     if fps:
         vf.append(f"fps={fps}")
+    if scale:
+        vf.append(f"scale={scale}")   # e.g. 1472:1440 -- match the calibrated size
     if rotate180:
         vf += ["hflip", "vflip"]
     if vf:
@@ -98,6 +100,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("videos", nargs="+", type=Path, help="_00_ insv (and optionally _10_)")
     ap.add_argument("-o", "--out", type=Path, required=True)
+    ap.add_argument("--scale", default="",
+                    help="ffmpeg scale WxH as W:H, e.g. 1472:1440 (5.7K insv is "
+                         "2944x2880/lens; the calib is for the half-size frames)")
     ap.add_argument("--fps", type=float, default=None,
                     help="frame extraction rate (default: every frame)")
     ap.add_argument("--no-frames", action="store_true", help="IMU only")
@@ -137,7 +142,7 @@ def main():
                    [(i, v, 0) for i, v in enumerate(args.videos)]
             for cam, v, stream in cams:
                 n = extract_frames(v, args.out / f"cam{cam}", args.fps, args.ext,
-                                   args.rotate180, stream)
+                                   args.rotate180, stream, scale=args.scale)
                 info["frames"][f"cam{cam}"] = n
                 print(f"cam{cam}: {n} frames -> {args.out / f'cam{cam}'}")
                 if cam == 0:
